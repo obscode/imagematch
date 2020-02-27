@@ -3,6 +3,7 @@
 import sys
 import tarfile
 from imagematch.ImageMatching_scalerot import *
+import imagematch
 from io import StringIO
 from imagematch import config
 import numpy as np

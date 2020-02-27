@@ -27,3 +27,5 @@ These are all available through anaconda or most other python distributions.
 - astropy 4+
 - numpy/scipy
 - vtk
+
+In addition, you will need to install `source extractor`(https://www.astromatic.net/software/sextractor)

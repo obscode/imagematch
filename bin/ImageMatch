@@ -1,0 +1,199 @@
+#!/usr/bin/env python
+
+import sys
+import tarfile
+from imagematch.ImageMatching_scalerot import *
+from io import StringIO
+from imagematch import config
+import numpy as np
+
+sample_config = '''
+[data]
+image = image.fits
+master = template.fits
+saturate = 65e3
+saturate2 = 65e3
+skylev = 
+skylev2 = 
+pakey = ROTANG
+scale = SCALE
+mscale = SCALE
+sigsuf = 
+wtype = MAP_RMS
+imask = 
+mmask = 
+snx = 
+sny = 
+
+[tasks]
+bs = True
+sex = True
+match = True
+subt = True
+
+[sex]
+thresh = 3.0
+sexdir = 
+nmax = 50
+min_sep = 
+reject = True
+
+[match]
+skyoff = True
+rev = False
+use_wcs = False
+registered = False
+nord = -1
+perr = 3.0
+ar = 
+pwid = 0
+vcut = 1e8
+mcut = 0
+xwin = 
+ywin = 
+crowd = False
+preserve = False
+quick_convolve = True
+db = 
+starlist = 
+spatial = False
+snmaskr = 10.0
+
+[subtract]
+diff_size = 
+
+'''
+
+from sys import argv
+from imagematch.rdarg import rdarg
+import CSPlib
+
+if '-dumpcfg' in argv:
+   f = open('sample.cfg','w')
+   f.write(sample_config)
+   f.close()
+   sys.exit(0)
+
+argv, cfgfile = rdarg(argv, "-cfg", None, None)
+if cfgfile is None:
+   cfgstr = StringIO(sample_config)
+   cfg = config.config(cfgstr)
+else:
+   cfg = config.config(cfgfile)
+
+
+argv, sex = rdarg(argv,"-sex",None,cfg.tasks.sex,single=1)
+argv, match = rdarg(argv,"-match",None,cfg.tasks.match,single=1)
+argv, sexdir = rdarg(argv,"-sexdir",None,cfg.sex.sexdir)
+argv, pakey = rdarg(argv,"-pakey",None,cfg.data.pakey)
+if pakey is None: pakey = 'rotangle'
+argv, scale = rdarg(argv,"-scale",None,cfg.data.scale)
+argv, mscale = rdarg(argv, "-mscale", None, cfg.data.mscale)
+argv, bs = rdarg(argv, '-bs', None, cfg.tasks.bs, single=True)
+argv, thresh = rdarg(argv,"-t",float,cfg.sex.thresh)
+argv, nmax = rdarg(argv,"-n",int,cfg.sex.nmax)
+argv, min_sep = rdarg(argv,"-ms",float,cfg.sex.min_sep)
+argv, nord = rdarg(argv,"-o",int,cfg.match.nord)
+argv, pwid = rdarg(argv,"-p",int,cfg.match.pwid)
+argv, perr = rdarg(argv,"-s",float,cfg.match.perr)
+argv, vcut = rdarg(argv,"-c",float,cfg.match.vcut)
+argv, mcut = rdarg(argv,"-M",int,cfg.match.mcut)
+argv, xwin = rdarg(argv,"-X",None,cfg.match.xwin)
+argv, ywin = rdarg(argv,"-Y",None,cfg.match.ywin)
+argv, saturate = rdarg(argv,"-max",float,cfg.data.saturate)
+argv, reject = rdarg(argv,"-reject",None,cfg.sex.reject, single=1)
+argv, saturate2 = rdarg(argv,"-max2",float,cfg.data.saturate2)
+argv, skylev = rdarg(argv,"-skylev",None,cfg.data.skylev)
+argv, skylev2 = rdarg(argv,"-skylev2",None,cfg.data.skylev2)
+argv, crowd = rdarg(argv, "-crowded", None, cfg.match.crowd, single=1)
+argv, spatial = rdarg(argv,"-spatial",None,cfg.match.spatial,single=1)
+argv, verb = rdarg(argv,"-v",None,0,single=1)
+argv, verb2 = rdarg(argv,"-vv",None,0,single=1)
+argv, subt = rdarg(argv,"-sub",None,cfg.tasks.subt,single=1)
+argv, skyoff = rdarg(argv,"-sky",None,cfg.match.skyoff,single=1)
+argv, rev = rdarg(argv,"-R",None,cfg.match.rev,single=1)
+argv, master = rdarg(argv,"-m",None,cfg.data.master)
+argv, registered = rdarg(argv,"-reg",None,cfg.match.registered,single=1)
+argv, preserve = rdarg(argv,"-preserve",None,cfg.match.preserve,single=1)
+argv, sigsuf = rdarg(argv,"-sig",None,cfg.data.sigsuf)
+argv, wtype = rdarg(argv,"-wtype",None,cfg.data.wtype)
+argv, imask_file = rdarg(argv, "-imask", None,cfg.data.imask)
+argv, mmask_file = rdarg(argv, "-mmask", None,cfg.data.mmask)
+argv, snx = rdarg(argv, "-snx", None, cfg.data.snx)
+argv, sny = rdarg(argv, "-sny", None, cfg.data.sny)
+argv, quick_convolve = rdarg(argv, "-fft", None, cfg.match.quick_convolve, single=1)
+argv, ar = rdarg(argv, "-arange", None, cfg.match.ar)
+argv, interactive = rdarg(argv, "-interactive", None, 0, single=1)
+argv, db = rdarg(argv, "-db", None, cfg.match.db, single=1)
+argv, diff_size = rdarg(argv, "-dsize", float, cfg.subtract.diff_size)
+argv, usewcs = rdarg(argv, "-wcs", None, cfg.match.use_wcs, single=1)
+argv, hdu = rdarg(argv, "-hdu", int, 0)
+argv, snmaskr = rdarg(argv, "-snsize", float,cfg.match.snmaskr)
+argv, starlist = rdarg(argv, "-starlist", None,cfg.match.starlist)
+
+libdir=os.path.realpath(os.path.dirname(imagematch.__file__))
+
+if sexdir is None:
+   t = tarfile.open(os.path.join(libdir, 'data', 'sexdir.tar.gz'))
+   t.extractall()
+   sexdir = os.path.join('.','sex')
+
+try:
+   scale = float(scale)
+except:
+   pass
+
+try:
+   mscale = float(mscale)
+except:
+   pass
+
+if xwin is not None and type(xwin) is type(""):
+   xwin = xwin.split(',')
+if ywin is not None and type(ywin) is type(""):
+   ywin = ywin.split(',')
+
+images = argv[1:]
+
+if ar:
+   li = ar.split(",")
+   if 1 < len(li) < 4:
+      li = map(float, li)
+      angles = arange(*li)
+   else:
+      print("Error:  -arange should have 2 or 3 angles, separated by commas")
+      sys.exit(1)
+else:
+   angles = [0.0]
+   
+if verb2:  verb = 2
+
+Observations = [Observation(image,scale=scale,pakey=pakey,saturate=saturate,\
+               skylev=skylev, sigsuf=sigsuf, wtype=wtype, mask_file=imask_file, 
+               reject=reject, snx=snx, sny=sny, snmaskr=snmaskr, hdu=hdu) \
+                for image in images]
+
+Epochs = [observation.epoch for observation in Observations]
+Observations = [Observations[j] for j in np.argsort(Epochs)]
+if master:
+   test = [observation for observation in Observations \
+           if observation.image == master]
+   if test: 
+      Master = test[0]
+      Master.mask_file = mmask_file
+   else: Master = Observation(master,scale=mscale,pakey=pakey,saturate=saturate2,
+                              skylev=skylev2, sigsuf=sigsuf, wtype=wtype, 
+                              mask_file=mmask_file, reject=reject, hdu=hdu)
+else: 
+   Master = Observations[-1]
+   Master.mask_file = mmask_file
+
+[observation.GoCatGo(Master,verb=verb,rev=rev,xwin=xwin,ywin=ywin,
+      perr=perr, skyoff=skyoff,pwid=pwid, nmax=nmax, 
+      min_sep=min_sep, nord=nord,spatial=spatial,mcut=mcut,
+      vcut=vcut,subt=subt,preserve=preserve,registered=registered,
+      match=match, quick_convolve=quick_convolve, do_sex=sex, thresh=thresh,
+      sexdir=sexdir, angles=angles, use_db=db, interactive=interactive,
+      diff_size=diff_size, bs=bs, crowd=crowd, usewcs=usewcs, starlist=starlist) \
+      for observation in Observations]
+

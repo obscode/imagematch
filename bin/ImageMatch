@@ -67,7 +67,6 @@ diff_size =
 
 from sys import argv
 from imagematch.rdarg import rdarg
-import CSPlib
 
 if '-dumpcfg' in argv:
    f = open('sample.cfg','w')

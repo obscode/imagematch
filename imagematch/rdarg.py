@@ -4,7 +4,7 @@ def rdarg(argv,key,conv=None,default=None,single=0):
     if not single:
       val=argv[argv.index(key)+1]
       del argv[argv.index(key):argv.index(key)+2]
-      if conv: val=map(conv,[val])[0]
+      if conv: val=conv(val)
     else:
       del argv[argv.index(key):argv.index(key)+1]
       val = 1

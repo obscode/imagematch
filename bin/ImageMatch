@@ -127,7 +127,7 @@ argv, interactive = rdarg(argv, "-interactive", None, 0, single=1)
 argv, db = rdarg(argv, "-db", None, cfg.match.db, single=1)
 argv, diff_size = rdarg(argv, "-dsize", float, cfg.subtract.diff_size)
 argv, usewcs = rdarg(argv, "-wcs", None, cfg.match.use_wcs, single=1)
-argv, hdu = rdarg(argv, "-hdu", int, 0)
+argv, hdu = rdarg(argv, "-hdu", None, cfg.data.hdu)
 argv, snmaskr = rdarg(argv, "-snsize", float,cfg.match.snmaskr)
 argv, starlist = rdarg(argv, "-starlist", None,cfg.match.starlist)
 

@@ -133,6 +133,12 @@ argv, starlist = rdarg(argv, "-starlist", None,cfg.match.starlist)
 
 libdir=os.path.realpath(os.path.dirname(imagematch.__file__))
 
+if hdu is None: hdu = 0
+try:
+   hdu = int(hdu)
+except:
+   pass
+
 if sexdir is None:
    t = tarfile.open(os.path.join(libdir, 'data', 'sexdir.tar.gz'))
    t.extractall()

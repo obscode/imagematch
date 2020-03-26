@@ -33,6 +33,7 @@ match = True
 subt = True
 
 [sex]
+sexcmd = sex
 thresh = 3.0
 sexdir = 
 nmax = 50
@@ -83,6 +84,7 @@ else:
 
 
 argv, sex = rdarg(argv,"-sex",None,cfg.tasks.sex,single=1)
+argv, sexcmd = rdarg(argv, '-sexcmd', None, cfg.sex.sexcmd)
 argv, match = rdarg(argv,"-match",None,cfg.tasks.match,single=1)
 argv, sexdir = rdarg(argv,"-sexdir",None,cfg.sex.sexdir)
 argv, pakey = rdarg(argv,"-pakey",None,cfg.data.pakey)
@@ -199,7 +201,8 @@ else:
       min_sep=min_sep, nord=nord,spatial=spatial,mcut=mcut,
       vcut=vcut,subt=subt,preserve=preserve,registered=registered,
       match=match, quick_convolve=quick_convolve, do_sex=sex, thresh=thresh,
-      sexdir=sexdir, angles=angles, use_db=db, interactive=interactive,
-      diff_size=diff_size, bs=bs, crowd=crowd, usewcs=usewcs, starlist=starlist) \
+      sexdir=sexdir, sexcmd=sexcmd, angles=angles, use_db=db, 
+      interactive=interactive, diff_size=diff_size, bs=bs, crowd=crowd, 
+      usewcs=usewcs, starlist=starlist) \
       for observation in Observations]
 

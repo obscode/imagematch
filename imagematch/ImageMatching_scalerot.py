@@ -322,10 +322,15 @@ class Observation:
       if self.exptime == "N/A": self.exptime = 1.0
       if type(scale) is type(""):
          self.scale = f[hdu].header.get(scale, "N/A")
+         if self.scale == 'N/A':
+            raise AttributeError("Scale keyword not found: {}".format(scale))
       else:
          self.scale = scale
       if skylev is not None:
          self.skylev = f[hdu].header.get(skylev, "N/A")
+         if self.skylev == 'N/A':
+            raise AttributeError("Sky level keyword not found: {}".format(\
+               scale))
          self.saturate = self.saturate - self.skylev
       else:
          self.skylev = 0
@@ -339,6 +344,8 @@ class Observation:
          except:
             snx = f[hdu].header.get(snx, "N/A")
             sny = f[hdu].header.get(sny, "N/A")
+            if snx == 'N/A' or sny == 'N/A':
+               raise AttributeError('SN position keywords not found')
             self.snpos = Point(snx,sny, self)
       else:
          self.snpos = None
@@ -378,7 +385,7 @@ class Observation:
       for rectification and solving for the kernel.'''
 
       if self.sexdir[-1] != "/": self.sexdir += "/"
-      self.sexcom = ["sex",self.image]
+      self.sexcom = [self.sexcmd,self.image]
       self.sexcom += ["-c "+self.sexdir+"default.sex"]
       self.sexcom += ["-PARAMETERS_NAME "+self.sexdir+"default.param"]
       if self.sigimage: self.sexcom += ["-WEIGHT_IMAGE "+self.sigimage]
@@ -1269,6 +1276,7 @@ class Observation:
                perr=5.0,nmax=40,nord=0,spatial=0,mcut=0,vcut=1e-2,match=1,
                subt=0, registered=0,preserve=0, min_sep=None,
                quick_convolve=0, do_sex=0, thresh=3., sexdir="./sex", 
+               sexcmd='sex',
                angles=[0.0], use_db=0, interactive=0, starlist=None, 
                diff_size=None, bs=False, crowd=False, usewcs=False):
       self.master = master
@@ -1295,9 +1303,11 @@ class Observation:
       self.master.verb = verb
       self.do_sex=do_sex
       self.sexdir = sexdir
+      self.sexcmd = sexcmd
       self.thresh = thresh
       self.master.do_sex=do_sex
       self.master.sexdir = sexdir
+      self.master.sexcmd = sexcmd
       self.master.thresh = thresh
       self.master.crowd = crowd
       self.imread(bs=bs, usewcs=usewcs)

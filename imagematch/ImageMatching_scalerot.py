@@ -20,6 +20,11 @@ import time,os
 from .fitsutils import qdump
 from .VTKHelperFunctions import *  # all start with VTK, so this is okay :)
 from .ReadSex import readsex
+from photutils import detect_threshold,detect_sources,Background2D
+from photutils import MedianBackground, detect_threshold
+from photutils import source_properties
+from photutils.utils import calc_total_error
+from astropy.convolution import Gaussian2DKernel
 from astropy.io import fits as FITS
 import numpy.fft as fft
 import numpy as np
@@ -256,7 +261,7 @@ class Observation:
    def __init__(self,image,wt=None,scale='scale',pakey="rotangle",
          saturate=30000, skylev=None, sigsuf=None, wtype="MAP_RMS", 
          mask_file=None, reject=0, snx=None, sny=None, snmaskr=10.0, 
-         extra_sufs=[], hdu=0):
+         extra_sufs=[], hdu=0, minarea=10):
 
       self.image = image   # The image name
       self.hdu = hdu
@@ -310,6 +315,8 @@ class Observation:
 
       self.wt = wt                      # Weights
       self.bg = 0.0                     # Background
+      self.bg_img = None                # 2D Background
+      self.bg_rms = None                # Background RMS
       self.saturate = saturate          # saturation value in image
 
       self.reject = reject              # completely reject saturated objects?
@@ -326,6 +333,7 @@ class Observation:
             raise AttributeError("Scale keyword not found: {}".format(scale))
       else:
          self.scale = scale
+      self.minarea = minarea
       if skylev is not None:
          self.skylev = f[hdu].header.get(skylev, "N/A")
          if self.skylev == 'N/A':
@@ -380,6 +388,41 @@ class Observation:
       '''Give the user a nice representation of the object.'''
       return self.image
 
+   def detectSources(self):
+      '''Use photutils to generate a segmentation map.'''
+      # Kernel to smooth the image
+      k = Gaussian2DKernel(1.27, x_size=3, y_size=3)
+      k.normalize()
+
+      # Next, compute the background
+      bg,rms = self.estimate_bg()
+
+      thresh = bg + 2*rms
+      seg = detect_sources(self.data, thresh, npixels=self.minarea,
+            filter_kernel=k)
+      self.seg = seg.data
+      # Save the segmentation map
+      qdump(self.segmap, self.seg, self.image)
+
+      # get the source locations and photometry
+      error = calc_total_error(self.data, rms, 1.0)
+      tab = source_properties(self.data, seg, error=error).to_table()
+      tab.rename_column('xcentroid','X_IMAGE')
+      tab.rename_column('ycentroid','Y_IMAGE')
+      tab['MAG_BEST'] = -2.5*np.log10(tab['source_sum']) + 30
+      tab['MAGERR_BEST'] = 1.087*tab['source_sum_err']/tab['source_sum']
+      tab['FLAGS'] = 0  # for now, need to figure out bad objects
+      self.sexdata = tab
+
+      newtab = tab['X_IMAGE','Y_IMAGE','MAG_BEST','MAGERR_BEST','FLAGS']
+      newtab['X_IMAGE'].info.format = '{:10.4f}'
+      newtab['Y_IMAGE'].info.format = '{:10.4f}'
+      newtab['MAG_BEST'].info.format = '{:7.3f}'
+      newtab['MAGERR_BEST'].info.format = '{:7.3f}'
+      newtab.write(self.catalog, format='ascii.fixed_width', delimiter=' ',
+            overwrite=True)
+
+      
    def sex(self):
       '''This function runs sextractor on the image, finding images to be used
       for rectification and solving for the kernel.'''
@@ -416,6 +459,18 @@ class Observation:
       self.seg = f[self.hdu].data
       f.close()
 
+   def getSources(self):
+      '''Read in the previously determined source catalog and segmentation 
+      map'''
+      if self.do_sex: 
+         self.detectSources()
+         return
+      self.sexdata = ascii.read(self.catalog)
+      f = FITS.open(self.segmap)
+      self.seg = f[self.hdu].data
+      f.close()
+      return
+
    def compute(self,nmax=40, min_sep=None):
       '''Based on the data output by SExtractor, build arrays of the distances
       and angles between all the objects in the catalog.  Used later to match
@@ -425,8 +480,8 @@ class Observation:
       self.min_sep = min_sep
       x = self.sexdata["X_IMAGE"]
       y = self.sexdata["Y_IMAGE"]
-      if "MAG_BEST" in self.sexdata: m = self.sexdata["MAG_BEST"]
-      elif "MAG_AUTO" in self.sexdata: m = self.sexdata["MAG_AUTO"]
+      if "MAG_BEST" in self.sexdata.colnames: m = self.sexdata["MAG_BEST"]
+      elif "MAG_AUTO" in self.sexdata.colnames: m = self.sexdata["MAG_AUTO"]
 
       # FLAGS can be used to filter out bad data
       q = self.sexdata["FLAGS"]
@@ -478,7 +533,8 @@ class Observation:
       self.log("Matching "+self.master.image+" to "+self.image)
       if "sexdata" not in dir(self.master):
          self.master.master = self.master
-         self.master.readcat()
+         #self.master.readcat()
+         self.master.getSources()
          self.master.compute(nmax=self.nmax, min_sep=self.min_sep)
 
       # Now we match objets to objects. There are several ways to do this...
@@ -639,16 +695,16 @@ class Observation:
          if iter:
             allx0 = np.array(self.sexdata["X_IMAGE"])
             ally0 = np.array(self.sexdata["Y_IMAGE"])
-            if "MAG_BEST" in self.sexdata: 
+            if "MAG_BEST" in self.sexdata.colnames: 
                allm0 = np.array(self.sexdata["MAG_BEST"])
-            elif "MAG_AUTO" in self.sexdata: 
+            elif "MAG_AUTO" in self.sexdata.colnames: 
                allm0 = np.array(self.sexdata["MAG_AUTO"])
             allq0 = np.array(self.sexdata["FLAGS"])
             allx1 = np.array(self.master.sexdata["X_IMAGE"])
             ally1 = np.array(self.master.sexdata["Y_IMAGE"])
-            if "MAG_BEST" in self.sexdata:
+            if "MAG_BEST" in self.sexdata.colnames:
                allm1 = np.array(self.master.sexdata["MAG_BEST"])
-            elif "MAG_AUTO" in self.sexdata: 
+            elif "MAG_AUTO" in self.sexdata.colnames: 
                allm1 = np.array(self.master.sexdata["MAG_AUTO"])
             allq1 = np.array(self.master.sexdata["FLAGS"])
             if nord == -1:
@@ -744,9 +800,9 @@ class Observation:
             # Keep track of where they were
             self.data = np.where(self.nans, 0.0, self.data)
             # make a new file, since sextractor is messed up by NaNs
-            newimage = self.image.replace('.fits','_nonan.fits')
-            qdump(newimage, self.data, self.image)
-            self.image = newimage
+            #newimage = self.image.replace('.fits','_nonan.fits')
+            #qdump(newimage, self.data, self.image)
+            #self.image = newimage
 
          # see if there is WCS info in the header
          if usewcs and wcs is not None:
@@ -874,20 +930,29 @@ class Observation:
 
    def estimate_bg(self, Niter=5):
       '''Estimate the background level.'''
-      for uk in range(Niter):
-         if uk:
-            ukeep = 1.0*between(self.data, bg-4*r, bg+2*r)
-            ukeep = 1.0*np.equal(VTKConvolve(ukeep, k=5, numret=1),1.0)
-            udata = np.compress(ukeep.ravel(), self.data.ravel())
-         else:
-            udata = self.data.ravel()
-         
-         bg = GaussianBG(udata,99)
-         #d = VTKSubtract(udata, bg)
-         d = udata - bg
-         r = 1.49*np.median(abs(d))
-         self.log("Using %d: BG=%.3f with sigma=%.3f" % (len(udata),bg,r))
-      return bg,r
+      if self.bg_img is not None:
+         return self.bg_img, self.bg_rms
+      bkg_est = MedianBackground()
+      bkg = Background2D(self.data, (50,50), filter_size=(3,3), 
+            bkg_estimator=bkg_est)
+      self.bg_img = bkg.background
+      self.bg_rms = bkg.background_rms
+      return self.bg_img,self.bg_rms
+
+      #for uk in range(Niter):
+      #   if uk:
+      #      ukeep = 1.0*between(self.data, bg-4*r, bg+2*r)
+      #      ukeep = 1.0*np.equal(VTKConvolve(ukeep, k=5, numret=1),1.0)
+      #      udata = np.compress(ukeep.ravel(), self.data.ravel())
+      #   else:
+      #      udata = self.data.ravel()
+      #   
+      #   bg = GaussianBG(udata,99)
+      #   #d = VTKSubtract(udata, bg)
+      #   d = udata - bg
+      #   r = 1.49*np.median(abs(d))
+      #   self.log("Using %d: BG=%.3f with sigma=%.3f" % (len(udata),bg,r))
+      #return bg,r
 
    def mkweight(self):
       '''This function works out the weight of the image, based on the noise
@@ -919,13 +984,17 @@ class Observation:
       mseg = np.greater(self.mseg,0.0).astype(np.float32)
 
       gwid = max([2,1*self.pwid])
-      self.bg,r = self.estimate_bg()
-      self.tbg,r2 = self.master.estimate_bg()
+      bg,r = self.estimate_bg()
+      self.bg = np.median(bg)
+      r = np.median(r)
+      tbg,r2 = self.master.estimate_bg()
+      self.tbg = np.median(tbg)
+      r2 = np.median(r2)
       self.log( "Image:" )
       self.log( "Using BG=%.3f with sigma=%.3f" % (self.bg,r))
-      self.log( "Cutting below 5-sigma: %.3f" % (self.bg-5*r))
+      self.log( "Cutting below 5-sigma: %.3f" % (self.bg - 5*r))
       self.log( "Template:" )
-      self.log( "Using BG=%.3f with sigma=%.3f" % (self.tbg,r2))
+      self.log( "Using BG=%.3f with sigma=%.3f" % (self.tbg, r2))
       self.log( "Cutting below 5-sigma: %.3f" % (self.tbg-5*r2))
       # Lower-cut. Reject data less than lcut
 
@@ -1311,8 +1380,10 @@ class Observation:
       self.master.thresh = thresh
       self.master.crowd = crowd
       self.imread(bs=bs, usewcs=usewcs)
-      self.readcat()
-      self.master.readcat()
+      #self.readcat()
+      self.getSources()
+      #self.master.readcat()
+      self.master.getSources()
       if self.snpos is not None:
          snx,sny = self.snpos.topixel()
       else:

@@ -21,6 +21,7 @@ from .fitsutils import qdump
 from .VTKHelperFunctions import *  # all start with VTK, so this is okay :)
 from .ReadSex import readsex
 from astropy.io import fits as FITS
+from astropy.io import ascii
 import numpy.fft as fft
 import numpy as np
 from .GaussianBG import GaussianBG
@@ -256,10 +257,12 @@ class Observation:
    def __init__(self,image,wt=None,scale='scale',pakey="rotangle",
          saturate=30000, skylev=None, sigsuf=None, wtype="MAP_RMS", 
          mask_file=None, reject=0, snx=None, sny=None, snmaskr=10.0, 
-         extra_sufs=[], hdu=0):
+         extra_sufs=[], hdu=0, magmin=None, magmax=None):
 
       self.image = image   # The image name
       self.hdu = hdu
+      self.magmin = magmin
+      self.magmax = magmax
 
       # Keep a logfile
       self.log_stream = open(self.image.replace('.fits','')+'.log', 'w')
@@ -294,6 +297,8 @@ class Observation:
       self.psfgrid = base.replace(".fits","grid.fits")
       # Name of output image with the final mask used
       self.masked = base.replace(".fits","mask.fits")
+      # Name of weight FITS image
+      self.weight = base.replace(".fits","weight.fits")
       # Name of output difference image
       self.difference = base.replace(".fits","diff.fits") # difference image
       # Name of optinal (400x400) output cutout around SN
@@ -403,18 +408,36 @@ class Observation:
       self.sexcom += ["-SATUR_LEVEL "+str(self.saturate)]
       self.sexcom += ["-DEBLEND_MINCONT 1"]
       self.sexcom += ["-VERBOSE_TYPE QUIET"]
+      if self.zp is not None:
+         self.sexcom += ["-MAG_ZEROPOINT " + str(self.zp)]
       self.sexcom = ' '.join(self.sexcom)
       if self.verb:
          self.log("Running {}".format(self.sexcom))
       os.system(self.sexcom)
 
-   def readcat(self):
+   def readcat(self, magcat=None, racol='RA', deccol='DEC', magcol='rmag'):
       '''Read the SExtractor output.'''
       if self.do_sex:  self.sex()
       self.sexdata = readsex(self.catalog)[0]
       f = FITS.open(self.segmap)
       self.seg = f[self.hdu].data
       f.close()
+      # read magnitude data
+      if magcat is not None:
+         if self.wcs is None:
+            raise AttributeError("To use magcat, you need a WCS in the image")
+         magtab = ascii.read(magcat)
+         ii,jj = self.wcs.wcs_world2pix(magtab[racol], magtab[deccol], 0)
+         self.segmags = np.zeros((self.seg.max()+1,))-999
+         for i in range(len(ii)):
+            if not 0 < jj[i] < self.data.shape[0] or \
+               not 0 < ii[i] < self.data.shape[1]:
+               continue
+            obj_id = self.seg[int(jj[i]),int(ii[i])]
+            if obj_id > 0:
+               self.segmags[obj_id] = magtab[i][magcol]
+      else:
+         self.segmags = self.sexdata['MAG_APER']
 
    def compute(self,nmax=40, min_sep=None):
       '''Based on the data output by SExtractor, build arrays of the distances
@@ -538,8 +561,8 @@ class Observation:
             uv0 = self.wcs.wcs_pix2world(np.transpose([self.x,self.y]),1)
             uv1 = self.master.wcs.wcs_pix2world(
                   np.transpose([self.master.x,self.master.y]),1)
-            np.savetxt('uv0', uv0)
-            np.savetxt('uv1', uv1)
+            #np.savetxt('uv0', uv0)
+            #np.savetxt('uv1', uv1)
             # dists[i,j] gives the absolute distance from object i in the 
             # image to object j in master
             dists = np.sqrt(np.power(uv0[:,0,NA] - uv1[NA,:,0],2) + \
@@ -733,10 +756,14 @@ class Observation:
    def imread(self, bs=False, usewcs=False):
       '''Read in the FITS data and assign to the member variables.  
       Optionall background subtract if bs=True'''
-      if self.data == None:
+      if self.data is None:
          self.log( "Now reading frames for %s" % (self))
          f = FITS.open(self.image)
          self.data = f[self.hdu].data.astype(np.float32)
+         if 'ZP' in f[self.hdu].header:
+            self.zp = f[self.hdu].header['ZP']
+         else:
+            self.zp = None
 
          # Check for NaNs
          self.nans = np.isnan(self.data)
@@ -798,6 +825,14 @@ class Observation:
          sat_pixels_m = np.logical_or(sat_pixels_m, self.master.nans)
          sat_ids_m = np.nonzero(np.ravel(sat_pixels_m))
          sat_objects_m = np.ravel(self.master.seg)[sat_ids_m]
+         if self.master.magmax or self.master.magmin:
+            gids = np.greater(self.master.segmags, -900)
+            if self.master.magmax: 
+               gids = gids*np.less(self.master.segmags, self.master.magmax)
+            if self.master.magmin: 
+               gids = gids*np.greater(self.master.segmags, self.master.magmin)
+            gids[0] = False   # zero is no object
+            sat_objects_m = np.concatenate([sat_objects_m,np.nonzero(~gids)[0]])
          # Now a bit of trickery to find non-repeating set of object numbers:
          objects_m = list(set(sat_objects_m))
          for obj in objects_m:
@@ -886,7 +921,7 @@ class Observation:
          #d = VTKSubtract(udata, bg)
          d = udata - bg
          r = 1.49*np.median(abs(d))
-         self.log("Using %d: BG=%.3f with sigma=%.3f" % (len(udata),bg,r))
+      self.log("Using %d: BG=%.3f with sigma=%.3f" % (len(udata),bg,r))
       return bg,r
 
    def mkweight(self):
@@ -906,6 +941,12 @@ class Observation:
          sat_pixels = np.logical_or(sat_pixels, self.nans)
          sat_ids = np.nonzero(np.ravel(sat_pixels))
          sat_objects = np.ravel(self.seg)[sat_ids]
+         if self.magmax or self.magmin:
+            gids = np.greater(self.segmags, -900)
+            if self.magmax: gids = gids*np.less(self.segmags, self.magmax)
+            if self.magmin: gids = gids*np.greater(self.segmags, self.magmin)
+            gids[0] = False   # zero is no object
+            sat_objects = np.concatenate([sat_objects, np.nonzero(~gids)[0]])
 
          # Now a bit of trickery to find non-repeating set of object numbers:
          objects = list(set(sat_objects))
@@ -916,7 +957,8 @@ class Observation:
 
       # Throug out any pixeles that don't have an object
       seg = np.greater(self.seg,0.0).astype(np.float32)
-      mseg = np.greater(self.mseg,0.0).astype(np.float32)
+      # put limit at 0.5, because mseg was transformed
+      mseg = np.greater(self.mseg,0.5).astype(np.float32)
 
       gwid = max([2,1*self.pwid])
       self.bg,r = self.estimate_bg()
@@ -986,174 +1028,191 @@ class Observation:
       self.wt = wt.astype(np.float32)
 
 
-   def mkmatch(self,preserve,quick_convolve=0):
+   def mkmatch(self,preserve,quick_convolve=0, Niter=1):
       '''Here's where the kernel is solved.  Need to work on comments here.
       Right now, it's pretty black-box.'''
-      wtflat = np.ravel(self.wt)
 
       # Try to get counts on same scale
       self.timage = self.timage * (self.exptime/self.master.exptime)
-      self.log( "Using %d pixels." % (np.sum(1.0*np.greater(wtflat,0))))
-      if self.pwid == -1:
-         # Just solving for a flux ratio
-         flux = np.sum(wtflat*np.ravel(self.data))/\
-               np.sum(wtflat*np.ravel(self.timage))
-         self.log( "Flux ratio = %.4f" % (flux))
-         self.match = flux*self.timage
-         if self.sigimage is not None and self.master.sigimage is not None:
-            self.csigma = np.sqrt(np.power(self.sigma,2) + \
-                  np.power(self.tsigma, 2))
-      else:
-         # Full width of the kernel, make it odd
-         pful = int(2*self.pwid+1)
-         owid = self.pwid + 1.0
-         # These are indices of the side of a box containing the kernel
-         pbox = np.arange(-self.pwid,self.pwid+0.5,1.0).astype(np.int32)
-         # These are the indices in the pbox that correspond to being
-         # inside a circular aperture.
-         self.ii = np.array([i for i in pbox for j in pbox \
-                          if (i*i+j*j)<=owid**2 or 0])
-         self.jj = np.array([j for i in pbox for j in pbox \
-                          if (i*i+j*j)<=owid**2 or 0])
-         ll = len(self.ii)
-         self.log( "Constructing bases.")
-         # The construction of bases depends on the image data or the template
-         #  (depending on direction), whether or not there is a sky offset
-         #  and whether or not there is spatial variation.
-         it0 = time.time()
-         basis_sigma = None
-         if self.rev:
-            f0 = np.compress(wtflat,wtflat*np.ravel(self.timage))
-            n0 = np.compress(wtflat,np.ravel(self.invnoise))
-            basisimage = self.data
-            if self.sigimage is not None:
-               # make a variance map 
-               basis_sigma = np.power(self.sigma, 2)
+      for i in range(Niter):
+         if i == 0:
+            # First time through
+            wtflat = np.ravel(self.wt)
          else:
-            f0 = np.compress(wtflat,wtflat*np.ravel(self.data))
-            n0 = np.compress(wtflat,np.ravel(self.invnoise))
-            basisimage = self.timage
-            if self.master.sigimage is not None:
-               basis_sigma = np.power(self.tsigma, 2)
-         step = ll/79 + 1  # for performance meter
-         cwt = np.compress(wtflat,wtflat)
-         # i,j indeces of masked image
-         coy,cox = np.compress(wtflat, 
-            [np.ravel(self.oy), np.ravel(self.ox)], 1).astype(np.int32)
-         flatimage = np.ravel(basisimage)
-         basis = []
-         for k in range(ll):
-            basis.append(cwt*np.take(flatimage,
-                  (coy+self.jj[k])*self.naxis1 + (cox+self.ii[k])))
-            if k % step == 0:
-               sys.stdout.write(".")
-               sys.stdout.flush()
+            # after first time throug:  throw out outliers.
+            # index numbers where we have non-zero weights
+            ids = np.nonzero(np.greater(wtflat, 0))[0]
+            # expected noise at those locations
+            sig = np.power(n0, -1)
+            # where the residuals exceed 5*noise
+            bids = np.greater(np.absolute(resid), 5*sig)
+            # set them to zero in the original weight-map
+            wtflat[ids[bids]] = 0
 
-         if self.skyoff: basis = np.concatenate([basis,
-            [np.ones(f0.shape,np.float64)]])
-         basis = np.asarray(basis)
-         if self.spatial:
-             self.oxl = (self.ox-self.naxis1/2.0)/(self.naxis1/2.0)
-             woxl = np.compress(wtflat,np.ravel(self.oxl))
-             self.oyl = (self.oy-self.naxis2/2.0)/(self.naxis2/2.0)
-             woyl = np.compress(wtflat,np.ravel(self.oyl))
-             xbasis = [b*woxl for b in basis[:-1]]
-             ybasis = [b*woyl for b in basis[:-1]]
-             basis = np.concatenate([basis,xbasis,ybasis])
-         it1 = time.time()
-         self.log( "Bases constructed in %.4fs." % (it1-it0))
-         self.log( "Decomposition.")
-         it0 = time.time()
-         self.log( "Size of basis matrix:")
-         self.log(str(basis.shape))
-         du,dv,dw = singular_value_decomposition(np.transpose(basis))
-         it1 = time.time()
-         self.log( "Decomposition in %.4fs." % (it1-it0))
-         bases = []
-         for sol1a in dw:
-             psf2 = np.zeros((pful,pful),np.float64)
-             for k in range(ll):
-                 py = self.jj[k]+self.pwid
-                 px = self.ii[k]+self.pwid
-                 pr = np.sqrt(self.jj[k]**2 + self.ii[k]**2)
-                 psf2[py,px] = sol1a[k]
-             bases.append(psf2)
-         bases = np.asarray(bases)
-         npsx = int(np.sqrt(bases.shape[0]))+1
-         npsy = bases.shape[0]//npsx + 1
-         imbases = np.zeros((npsy*(bases.shape[1]+5), 
-                             npsx*(bases.shape[2]+5)), np.float64)
-         imb1 = 0
-         for j in range(npsy):
-           for i in range(npsx):
-              y0 = j*(bases.shape[1]+5)
-              y1 = y0 + bases.shape[1]
-              x0 = i*(bases.shape[2]+5)
-              x1 = x0 + bases.shape[2]
-              imbases[y0:y1,x0:x1] = bases[imb1,::-1,::]
-              imb1 += 1
-              if imb1 == len(bases): break
-         imbases = imbases[::-1]
-         qdump(self.imbases,imbases,self.image)
-         if self.verb > 1: self.log( dv)
-         sol1 = np.transpose(dw)
-         if self.mcut and self.mcut < len(dv):
-             self.log( "Ratio of first eigenvalue with last ten:")
-             rdv = dv[0]/dv
-             self.log( rdv[-10:])
-             qdump(self.rdv,rdv)
-             dv[self.mcut:] = 0 * dv[self.mcut:]
-             sol2 = divz(1,dv[:self.mcut])
-             sol3 = np.dot(np.transpose(du[::,:self.mcut]),f0)
-             self.psf1 = np.dot(sol1[::,:self.mcut], (sol2*sol3))
-             fitted = np.add.reduce(self.psf1[::,NA]*basis,0)
-             resid = fitted - f0
-             vc = dv[0]/dv[self.mcut-1]
-             umean = np.mean(resid)
-             urms = np.sqrt(np.mean(np.power(resid,2)))
-             uchi2 = np.sum(np.power(resid*n0,2))
-             uchi2u = uchi2 / (len(resid)-self.mcut)
-             self.log( "(CUT,MEAN,RMS,CHI2,RCHI2) = "
-                       "(%9.1f,%12.6f,%12.6f,%12.6f,%12.6f)"\
-                             % (vc,umean,urms,uchi2,uchi2u))
+ 
+         self.log( "Using %d pixels." % (np.sum(1.0*np.greater(wtflat,0))))
+         if self.pwid == -1:
+            # Just solving for a flux ratio
+            flux = np.sum(wtflat*np.ravel(self.data))/\
+                  np.sum(wtflat*np.ravel(self.timage))
+            self.log( "Flux ratio = %.4f" % (flux))
+            self.match = flux*self.timage
+            resid = np.compress(wtflat, np.ravel(self.data)) -\
+                    np.compress(wtflat, np.ralve(self.timage))
+            if self.sigimage is not None and self.master.sigimage is not None:
+               self.csigma = np.sqrt(np.power(self.sigma,2) + \
+                     np.power(self.tsigma, 2))
          else:
-             self.log( "Ratio of first eigenvalue with last ten:")
-             rdv = 1.0/dv
-             self.log( str(rdv[-10:]))
-             qdump(self.rdv,rdv)
-             cdv = np.zeros(rdv.shape,np.float64)
-             if self.vcut == 0: ucv = [0,1]
-             else: ucv = [1]
-             for cv in ucv:
-                if cv:
-                    if self.vcut == 0:
-                       qdump("cdv.fits",rdv - cdv)
-                       tck = splrep(np.arange(len(dv)),rdv-cdv,k=1,s=0)
-                       vloc = sproot(tck,mest=len(dv))
-                       vloc = int(vloc[0])
-                       self.vcut = 10*rdv[vloc]
-                    rdv = [self.vcut]
-                    self.log( "Cutting at %1f." % (self.vcut))
-                for jvc in range(len(rdv)):
-                    vc = rdv[jvc]
-                    udv = 1.0*np.greater_equal(dv,max(dv)/vc)
-                    jcut = int(np.sum(udv))
-                    if cv: self.log( "Using %d out of %d." % \
-                          (np.sum(udv),len(udv)))
-                    sol2 = divz(1,dv[:jcut])
-                    sol3 = np.dot(np.transpose(du[::,:jcut]),f0)
-                    self.psf1 = np.dot(sol1[::,:jcut], (sol2*sol3))
-                    fitted = np.add.reduce(self.psf1[::,NA]*basis,0)
-                    resid = fitted - f0
-                    umean = np.mean(resid)
-                    urms = np.sqrt(np.mean(np.power(resid,2)))
-                    uchi2 = np.sum(np.power(divz(resid,n0),2))
-                    uchi2u = uchi2 / (len(resid)-self.mcut)
-                    if not cv: cdv[jvc] = urms
-                    self.log( "(CUT,MEAN,RMS,CHI2,RCHI2) = "
-                              "(%9.1f,%12.6f,%12.6f,%12.6f,%12.6f)" \
-                                    % (vc,umean,urms,uchi2,uchi2u))
-         del sol1,sol2,sol3,du,dv,dw,basis
+            # Full width of the kernel, make it odd
+            pful = int(2*self.pwid+1)
+            owid = self.pwid + 1.0
+            # These are indices of the side of a box containing the kernel
+            pbox = np.arange(-self.pwid,self.pwid+0.5,1.0).astype(np.int32)
+            # These are the indices in the pbox that correspond to being
+            # inside a circular aperture.
+            self.ii = np.array([i for i in pbox for j in pbox \
+                             if (i*i+j*j)<=owid**2 or 0])
+            self.jj = np.array([j for i in pbox for j in pbox \
+                             if (i*i+j*j)<=owid**2 or 0])
+            ll = len(self.ii)
+            self.log( "Constructing bases.")
+            # The construction of bases depends on the image data or the template
+            #  (depending on direction), whether or not there is a sky offset
+            #  and whether or not there is spatial variation.
+            it0 = time.time()
+            basis_sigma = None
+            if self.rev:
+               f0 = np.compress(wtflat,np.ravel(self.timage))
+               n0 = np.compress(wtflat,np.ravel(self.invnoise))
+               basisimage = self.data
+               if self.sigimage is not None:
+                  # make a variance map 
+                  basis_sigma = np.power(self.sigma, 2)
+            else:
+               f0 = np.compress(wtflat,np.ravel(self.data))
+               n0 = np.compress(wtflat,np.ravel(self.invnoise))
+               basisimage = self.timage
+               if self.master.sigimage is not None:
+                  basis_sigma = np.power(self.tsigma, 2)
+            step = ll/79 + 1  # for performance meter
+            cwt = np.compress(wtflat,wtflat)
+            # i,j indeces of masked image
+            coy,cox = np.compress(wtflat, 
+               [np.ravel(self.oy), np.ravel(self.ox)], 1).astype(np.int32)
+            flatimage = np.ravel(basisimage)
+            basis = []
+            for k in range(ll):
+               basis.append(cwt*np.take(flatimage,
+                     (coy+self.jj[k])*self.naxis1 + (cox+self.ii[k])))
+               if k % step == 0:
+                  sys.stdout.write(".")
+                  sys.stdout.flush()
+ 
+            if self.skyoff: basis = np.concatenate([basis,
+               [np.ones(f0.shape,np.float64)]])
+            basis = np.asarray(basis)
+            if self.spatial:
+                self.oxl = (self.ox-self.naxis1/2.0)/(self.naxis1/2.0)
+                woxl = np.compress(wtflat,np.ravel(self.oxl))
+                self.oyl = (self.oy-self.naxis2/2.0)/(self.naxis2/2.0)
+                woyl = np.compress(wtflat,np.ravel(self.oyl))
+                xbasis = [b*woxl for b in basis[:-1]]
+                ybasis = [b*woyl for b in basis[:-1]]
+                basis = np.concatenate([basis,xbasis,ybasis])
+            it1 = time.time()
+            self.log( "Bases constructed in %.4fs." % (it1-it0))
+            self.log( "Decomposition.")
+            it0 = time.time()
+            self.log( "Size of basis matrix:")
+            self.log(str(basis.shape))
+            du,dv,dw = singular_value_decomposition(np.transpose(basis))
+            it1 = time.time()
+            self.log( "Decomposition in %.4fs." % (it1-it0))
+            bases = []
+            for sol1a in dw:
+                psf2 = np.zeros((pful,pful),np.float64)
+                for k in range(ll):
+                    py = self.jj[k]+self.pwid
+                    px = self.ii[k]+self.pwid
+                    pr = np.sqrt(self.jj[k]**2 + self.ii[k]**2)
+                    psf2[py,px] = sol1a[k]
+                bases.append(psf2)
+            bases = np.asarray(bases)
+            npsx = int(np.sqrt(bases.shape[0]))+1
+            npsy = bases.shape[0]//npsx + 1
+            imbases = np.zeros((npsy*(bases.shape[1]+5), 
+                                npsx*(bases.shape[2]+5)), np.float64)
+            imb1 = 0
+            for j in range(npsy):
+              for i in range(npsx):
+                 y0 = j*(bases.shape[1]+5)
+                 y1 = y0 + bases.shape[1]
+                 x0 = i*(bases.shape[2]+5)
+                 x1 = x0 + bases.shape[2]
+                 imbases[y0:y1,x0:x1] = bases[imb1,::-1,::]
+                 imb1 += 1
+                 if imb1 == len(bases): break
+            imbases = imbases[::-1]
+            qdump(self.imbases,imbases,self.image)
+            if self.verb > 1: self.log( dv)
+            sol1 = np.transpose(dw)
+            if self.mcut and self.mcut < len(dv):
+                self.log( "Ratio of first eigenvalue with last ten:")
+                rdv = dv[0]/dv
+                self.log( rdv[-10:])
+                qdump(self.rdv,rdv)
+                dv[self.mcut:] = 0 * dv[self.mcut:]
+                sol2 = divz(1,dv[:self.mcut])
+                sol3 = np.dot(np.transpose(du[::,:self.mcut]),cwt*f0)
+                self.psf1 = np.dot(sol1[::,:self.mcut], (sol2*sol3))
+                fitted = np.add.reduce(self.psf1[::,NA]*basis,0)
+                resid = fitted - f0
+                vc = dv[0]/dv[self.mcut-1]
+                umean = np.mean(resid)
+                urms = np.sqrt(np.mean(np.power(resid,2)))
+                uchi2 = np.sum(np.power(resid*n0,2))
+                uchi2u = uchi2 / (len(resid)-self.mcut)
+                self.log( "(CUT,MEAN,RMS,CHI2,RCHI2) = "
+                          "(%9.1f,%12.6f,%12.6f,%12.6f,%12.6f)"\
+                                % (vc,umean,urms,uchi2,uchi2u))
+            else:
+                self.log( "Ratio of first eigenvalue with last ten:")
+                rdv = 1.0/dv
+                self.log( str(rdv[-10:]))
+                qdump(self.rdv,rdv)
+                cdv = np.zeros(rdv.shape,np.float64)
+                if self.vcut == 0: ucv = [0,1]
+                else: ucv = [1]
+                for cv in ucv:
+                   if cv:
+                       if self.vcut == 0:
+                          qdump("cdv.fits",rdv - cdv)
+                          tck = splrep(np.arange(len(dv)),rdv-cdv,k=1,s=0)
+                          vloc = sproot(tck,mest=len(dv))
+                          vloc = int(vloc[0])
+                          self.vcut = 10*rdv[vloc]
+                       rdv = [self.vcut]
+                       self.log( "Cutting at %1f." % (self.vcut))
+                   for jvc in range(len(rdv)):
+                       vc = rdv[jvc]
+                       udv = 1.0*np.greater_equal(dv,max(dv)/vc)
+                       jcut = int(np.sum(udv))
+                       if cv: self.log( "Using %d out of %d." % \
+                             (np.sum(udv),len(udv)))
+                       sol2 = divz(1,dv[:jcut])
+                       sol3 = np.dot(np.transpose(du[::,:jcut]),cwt*f0)
+                       self.psf1 = np.dot(sol1[::,:jcut], (sol2*sol3))
+                       fitted = np.add.reduce(self.psf1[::,NA]*basis,0)
+                       resid = fitted - f0
+                       umean = np.mean(resid)
+                       urms = np.sqrt(np.mean(np.power(resid,2)))
+                       uchi2 = np.sum(np.power(divz(resid,n0),2))
+                       uchi2u = uchi2 / (len(resid)-self.mcut)
+                       if not cv: cdv[jvc] = urms
+                       self.log( "(CUT,MEAN,RMS,CHI2,RCHI2) = "
+                                 "(%9.1f,%12.6f,%12.6f,%12.6f,%12.6f)" \
+                                       % (vc,umean,urms,uchi2,uchi2u))
+            del sol1,sol2,sol3,du,dv,dw,basis
          if self.skyoff: 
             self.log( "Sky= %f" % (self.psf1[ll]))
          # Save the flux ratio for later if reversing.
@@ -1273,28 +1332,29 @@ class Observation:
 
 
    def GoCatGo(self,master,verb=0,rev=0,xwin=None,ywin=None, skyoff=0,pwid=0,
-               perr=5.0,nmax=40,nord=0,spatial=0,mcut=0,vcut=1e-2,match=1,
+               perr=5.0,nmax=40,nord=0,spatial=0,mcut=0,vcut=1e8,match=1,
                subt=0, registered=0,preserve=0, min_sep=None,
                quick_convolve=0, do_sex=0, thresh=3., sexdir="./sex", 
                sexcmd='sex',
                angles=[0.0], use_db=0, interactive=0, starlist=None, 
-               diff_size=None, bs=False, crowd=False, usewcs=False):
+               diff_size=None, bs=False, crowd=False, usewcs=False,
+               magcat=None, racol='RA', deccol='DEC', magcol='mag'):
       self.master = master
       self.skyoff=skyoff
       self.pwid=pwid
       if xwin and ywin:
          self.mask.add_mask(xwin[0], ywin[0], xwin[1], ywin[1], 
                sense='outside')
-         self.master.mask.add_mask(xwin[0], ywin[0], xwin[1], ywin[1], 
-               sense='outside')
+         #self.master.mask.add_mask(xwin[0], ywin[0], xwin[1], ywin[1], 
+         #      sense='outside')
       elif xwin:
          self.mask.add_mask(xwin[0], None, xwin[1], None, sense='outside')
-         self.master.mask.add_mask(xwin[0], None, xwin[1], None, 
-               sense='outside')
+         #self.master.mask.add_mask(xwin[0], None, xwin[1], None, 
+         #      sense='outside')
       elif ywin:
          self.mask.add_mask(None, ywin[0], None, ywin[1], sense='outside')
-         self.master.mask.add_mask(None, ywin[0], None, ywin[1], 
-               sense='outside')
+         #self.master.mask.add_mask(None, ywin[0], None, ywin[1], 
+         #      sense='outside')
       self.spatial=spatial
       self.rev=rev
       self.vcut=vcut
@@ -1311,8 +1371,8 @@ class Observation:
       self.master.thresh = thresh
       self.master.crowd = crowd
       self.imread(bs=bs, usewcs=usewcs)
-      self.readcat()
-      self.master.readcat()
+      self.readcat(magcat, racol, deccol, magcol)
+      self.master.readcat(magcat, racol, deccol, magcol)
       if self.snpos is not None:
          snx,sny = self.snpos.topixel()
       else:
@@ -1333,6 +1393,8 @@ class Observation:
             return -1
       self.mktemplate(registered, usewcs=False)
       self.mkweight()
+      qdump(self.weight, self.wt, self.image)
+
       qdump(self.rectemp,self.timage*(self.exptime/self.master.exptime)- \
             self.bg,self.master.image)
       if self.tsigma is not None:

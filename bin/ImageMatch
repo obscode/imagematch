@@ -5,7 +5,7 @@ import tarfile
 from imagematch.ImageMatching_scalerot import *
 import imagematch
 from io import StringIO
-from imagematch import config
+from imag/ematch import config
 import numpy as np
 
 sample_config = '''
@@ -16,6 +16,10 @@ saturate = 65e3
 saturate2 = 65e3
 skylev = 
 skylev2 = 
+magmax =
+maxmax2 =
+magmin =
+magmin2 =
 pakey = ROTANG
 scale = SCALE
 mscale = SCALE
@@ -39,6 +43,10 @@ sexdir =
 nmax = 50
 min_sep = 
 reject = True
+magcat =
+racol = RA
+deccol = DEC
+magcol = rmag
 
 [match]
 skyoff = True
@@ -132,6 +140,14 @@ argv, usewcs = rdarg(argv, "-wcs", None, cfg.match.use_wcs, single=1)
 argv, hdu = rdarg(argv, "-hdu", None, cfg.data.hdu)
 argv, snmaskr = rdarg(argv, "-snsize", float,cfg.match.snmaskr)
 argv, starlist = rdarg(argv, "-starlist", None,cfg.match.starlist)
+argv, magcat = rdarg(argv, "-magcat", None, cfg.sex.magcat)
+argv, racol = rdarg(argv, "-racol", None, cfg.sex.racol)
+argv, deccol = rdarg(argv, "-deccol", None, cfg.sex.deccol)
+argv, magcol = rdarg(argv, "-magcol", None, cfg.sex.magcol)
+argv, magmax = rdarg(argv, "-magmax", float, cfg.data.magmax)
+argv, magmin = rdarg(argv, "-magmin", float, cfg.data.magmin)
+argv, magmax2 = rdarg(argv, "-magmax2", float, cfg.data.magmax2)
+argv, magmin2 = rdarg(argv, "-magmin2", float, cfg.data.magmin2)
 
 libdir=os.path.realpath(os.path.dirname(imagematch.__file__))
 
@@ -178,7 +194,8 @@ if verb2:  verb = 2
 
 Observations = [Observation(image,scale=scale,pakey=pakey,saturate=saturate,\
                skylev=skylev, sigsuf=sigsuf, wtype=wtype, mask_file=imask_file, 
-               reject=reject, snx=snx, sny=sny, snmaskr=snmaskr, hdu=hdu) \
+               reject=reject, snx=snx, sny=sny, snmaskr=snmaskr, hdu=hdu,
+               magmax=magmax, magmin=magmin) \
                 for image in images]
 
 Epochs = [observation.epoch for observation in Observations]
@@ -189,9 +206,11 @@ if master:
    if test: 
       Master = test[0]
       Master.mask_file = mmask_file
-   else: Master = Observation(master,scale=mscale,pakey=pakey,saturate=saturate2,
+   else: Master = Observation(master,scale=mscale,pakey=pakey,
+                              saturate=saturate2,
                               skylev=skylev2, sigsuf=sigsuf, wtype=wtype, 
-                              mask_file=mmask_file, reject=reject, hdu=hdu)
+                              mask_file=mmask_file, reject=reject, hdu=hdu,
+                              magmax=magmax2, magmin=magmin2)
 else: 
    Master = Observations[-1]
    Master.mask_file = mmask_file
@@ -203,6 +222,6 @@ else:
       match=match, quick_convolve=quick_convolve, do_sex=sex, thresh=thresh,
       sexdir=sexdir, sexcmd=sexcmd, angles=angles, use_db=db, 
       interactive=interactive, diff_size=diff_size, bs=bs, crowd=crowd, 
-      usewcs=usewcs, starlist=starlist) \
-      for observation in Observations]
+      usewcs=usewcs, starlist=starlist, magcat=magcat, racol=racol, 
+      deccol=deccol, magcol=magcol) for observation in Observations]
 

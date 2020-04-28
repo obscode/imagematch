@@ -5,7 +5,7 @@ import tarfile
 from imagematch.ImageMatching_scalerot import *
 import imagematch
 from io import StringIO
-from imag/ematch import config
+from imagematch import config
 import numpy as np
 
 sample_config = '''

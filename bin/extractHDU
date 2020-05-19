@@ -1,0 +1,23 @@
+#!/usr/bin/env python
+
+from astropy.io import fits
+from argparse import ArgumentParser
+import sys
+
+parser = ArgumentParser(description='Extract a single HDU from a multi-HDU'\
+      ' FITS file')
+parser.add_argument('infile', help="FITS file to read")
+parser.add_argument('outfile', help="Output FITS file")
+parser.add_argument('-hdu', help="HDU to remove. Default: first (0)", default=0,
+      type=int)
+
+args = parser.parse_args()
+
+fts = fits.open(args.infile)
+if args.hdu >= len(fts):
+   print("Error:  You asked for HDU {}, but {} only has {}".format(
+      args.hdu, args.infile, len(fts)))
+   sys.exit(1)
+hdu = fts[args.hdu]
+newfts = fits.HDUList(hdu)
+newfts.writeto(args.outfile)

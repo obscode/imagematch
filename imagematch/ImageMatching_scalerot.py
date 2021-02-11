@@ -16,8 +16,9 @@
   02/13/2020:  Ack, 10 years later!  Trying to port this to more common
                 modules and python 3
 '''
+import gc
 import time,os
-from .fitsutils import qdump
+from .fitsutils import qdump, qload
 from .VTKHelperFunctions import *  # all start with VTK, so this is okay :)
 from .ReadSex import readsex
 from astropy.io import fits as FITS
@@ -35,6 +36,7 @@ debug = 1
 try:
    from . import Picker
    from matplotlib import pyplot as plt
+   from matplotlib import rcParams
    from astropy.visualization import simple_norm
 except:
    Picker = None
@@ -265,9 +267,11 @@ class Observation:
       self.magmax = magmax
 
       # Keep a logfile
-      self.log_stream = open(self.image.replace('.fits','')+'.log', 'w')
+      #self.log_stream = open(self.image.replace('.fits','')+'.log', 'w')
+      self.log_stream = None
 
-      base = os.path.basename(image)
+      #base = os.path.basename(image)
+      base = image
       self.catalog = base.replace(".fits",".cat")  # Output catalog of objects
       # Error maps
       if sigsuf: 
@@ -320,19 +324,20 @@ class Observation:
       self.reject = reject              # completely reject saturated objects?
 
       # Try to figure some stuff out from the header
-      f = FITS.open(self.image)
-      self.epoch = f[hdu].header.get("epoch", "N/A")
-      self.exptime = f[hdu].header.get("exptime", "N/A")
+      #f = FITS.open(self.image, memmap=False)
+      header,d = qload(self.image, hdu)
+      self.epoch = header.get("epoch", "N/A")
+      self.exptime = header.get("exptime", "N/A")
       if self.epoch == "N/A": self.epoch = -99
       if self.exptime == "N/A": self.exptime = 1.0
       if type(scale) is type(""):
-         self.scale = f[hdu].header.get(scale, "N/A")
+         self.scale = header.get(scale, "N/A")
          if self.scale == 'N/A':
             raise AttributeError("Scale keyword not found: {}".format(scale))
       else:
          self.scale = scale
       if skylev is not None:
-         self.skylev = f[hdu].header.get(skylev, "N/A")
+         self.skylev = header.get(skylev, "N/A")
          if self.skylev == 'N/A':
             raise AttributeError("Sky level keyword not found: {}".format(\
                scale))
@@ -347,8 +352,8 @@ class Observation:
          try:
             self.snpos = Point(snx, sny, self)
          except:
-            snx = f[hdu].header.get(snx, "N/A")
-            sny = f[hdu].header.get(sny, "N/A")
+            snx = header.get(snx, "N/A")
+            sny = header.get(sny, "N/A")
             if snx == 'N/A' or sny == 'N/A':
                raise AttributeError('SN position keywords not found')
             self.snpos = Point(snx,sny, self)
@@ -367,9 +372,9 @@ class Observation:
             self.mask.add_mask(x0,y0,x1,y1, sense='inside')
             self.log('Adding mask: %s %s %s %s' % (x0,y0,x1,y1))
          mf.close()
-      self.pa = f[hdu].header.get(pakey, "N/A")
+      self.pa = header.get(pakey, "N/A")
       if self.pa == "N/A": self.pa = 0.0
-      f.close()
+      #f.close()
       self.data = None
       self.nans = None   # where the data are NaN
       self.master = None
@@ -419,9 +424,10 @@ class Observation:
       '''Read the SExtractor output.'''
       if self.do_sex:  self.sex()
       self.sexdata = readsex(self.catalog)[0]
-      f = FITS.open(self.segmap)
-      self.seg = f[self.hdu].data
-      f.close()
+      #f = FITS.open(self.segmap, memmap=False)
+      #self.seg = f[self.hdu].data
+      h,self.seg = qload(self.segmap, self.hdu)
+      #f.close()
       # read magnitude data
       if magcat is not None:
          if self.wcs is None:
@@ -561,8 +567,8 @@ class Observation:
             uv0 = self.wcs.wcs_pix2world(np.transpose([self.x,self.y]),1)
             uv1 = self.master.wcs.wcs_pix2world(
                   np.transpose([self.master.x,self.master.y]),1)
-            #np.savetxt('uv0', uv0)
-            #np.savetxt('uv1', uv1)
+            np.savetxt('uv0', uv0)
+            np.savetxt('uv1', uv1)
             # dists[i,j] gives the absolute distance from object i in the 
             # image to object j in master
             dists = np.sqrt(np.power(uv0[:,0,NA] - uv1[NA,:,0],2) + \
@@ -758,10 +764,16 @@ class Observation:
       Optionall background subtract if bs=True'''
       if self.data is None:
          self.log( "Now reading frames for %s" % (self))
-         f = FITS.open(self.image)
-         self.data = f[self.hdu].data.astype(np.float32)
-         if 'ZP' in f[self.hdu].header:
-            self.zp = f[self.hdu].header['ZP']
+         #f = FITS.open(self.image, memmap=False)
+         #self.data = f[self.hdu].data.astype(np.float32)
+         h,self.data = qload(self.image, self.hdu)
+         #h = FITS.getheader(self.image, self.hdu)
+         if 'ZP' in h:
+            if type(h['ZP']) is type(1.0):
+               self.zp = h['ZP']
+            else:
+               print("Warning: FITS header ZP is present, but not a float")
+               self.zp = None
          else:
             self.zp = None
 
@@ -777,7 +789,7 @@ class Observation:
 
          # see if there is WCS info in the header
          if usewcs and wcs is not None:
-            self.wcs = wcs.WCS(f[self.hdu].header)
+            self.wcs = wcs.WCS(h)
             #if self.wcs.types[0] is None or self.wcs.types[1] is None:
             #   # Bad WCS
             #   self.wcs = None
@@ -789,17 +801,18 @@ class Observation:
          if bs:
             self.data = self.data - GaussianBG(np.ravel(self.data).astype(
                                                np.float32),101)
-         self.naxis1,self.naxis2 = f[self.hdu].header['NAXIS1'],\
-                                   f[self.hdu].header['NAXIS2']
-         f.close()
+         self.naxis1,self.naxis2 = h['NAXIS1'],\
+                                   h['NAXIS2']
+         #f.close()
          if self.master: 
             self.master.imread(bs=bs, usewcs=usewcs)
 
          if self.sigimage is not None:
             self.log( "Reading in sigma map %s" % self.sigimage)
-            f = FITS.open(self.sigimage)
-            self.sigma = f[self.hdu].data.astype(np.float32)
-            f.close()
+            #f = FITS.open(self.sigimage, memmap=False)
+            #self.sigma = f[self.hdu].data.astype(np.float32)
+            #f.close()
+            h,self.sigma = qload(self.sigimage, self.hdu)
          else:
             self.sigma = None
 
@@ -807,9 +820,10 @@ class Observation:
             self.extras = []
             for xmap in self.extra_maps:
                self.log("Reading in extra map %s" % xmap)
-               f = FITS.open(xmap)
-               self.extras.append(f[self.hdu].data.astype(np.float32))
-               f.close()
+               #f = FITS.open(xmap, memmap=False)
+               #self.extras.append(f[self.hdu].data.astype(np.float32))
+               #f.close()
+               self.extras.append(qload(xmap, self.hdu)[1])
          else:
             self.extras = None
 
@@ -1058,10 +1072,11 @@ class Observation:
             self.log( "Flux ratio = %.4f" % (flux))
             self.match = flux*self.timage
             resid = np.compress(wtflat, np.ravel(self.data)) -\
-                    np.compress(wtflat, np.ralve(self.timage))
+                    np.compress(wtflat, np.ravel(self.timage))
             if self.sigimage is not None and self.master.sigimage is not None:
                self.csigma = np.sqrt(np.power(self.sigma,2) + \
                      np.power(self.tsigma, 2))
+            return
          else:
             # Full width of the kernel, make it odd
             pful = int(2*self.pwid+1)
@@ -1213,7 +1228,7 @@ class Observation:
                                  "(%9.1f,%12.6f,%12.6f,%12.6f,%12.6f)" \
                                        % (vc,umean,urms,uchi2,uchi2u))
             del sol1,sol2,sol3,du,dv,dw,basis
-         if self.skyoff: 
+         if self.skyoff and self.pwid > 0: 
             self.log( "Sky= %f" % (self.psf1[ll]))
          # Save the flux ratio for later if reversing.
          self.fluxrat = np.sum(self.psf1[:ll])
@@ -1417,7 +1432,7 @@ class Observation:
                        np.power(ids[0]-sny,2))
                diff = self.match - \
                      np.where(np.less(dists,diff_size/self.scale),
-                              self.image/self.fluxrat, 0)
+                              self.timage/self.fluxrat, 0)
             else:
                diff = (self.match-self.timage/self.fluxrat)
             qdump(self.difference,diff,self.image)
@@ -1469,7 +1484,8 @@ class Observation:
 
    def plot_diff(self):
 
-      fig,axs = plt.subplots(1,3,figsize=(15,5))
+      fig,axs = plt.subplots(1,3,figsize=(15,5), 
+            dpi=rcParams['figure.dpi']*0.7)
       plt.subplots_adjust(wspace=0)
       if self.snpos is not None:
          snx,sny = self.snpos.topixel()
@@ -1496,6 +1512,6 @@ class Observation:
       axs[2].set_xlabel('Difference')
       fig.tight_layout()
 
-      fig.savefig(self.SN.replace('.fits', '_diff.png'))
+      fig.savefig(self.SN.replace('.fits', '_diff.jpg'))
 
 

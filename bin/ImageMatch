@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 
+import matplotlib
+matplotlib.use('Agg')
 import sys
 import tarfile
 from imagematch.ImageMatching_scalerot import *
@@ -68,10 +70,11 @@ db =
 starlist = 
 spatial = False
 snmaskr = 10.0
+starmin = 0
+dmax = -1
 
 [subtract]
 diff_size = 
-
 '''
 
 from sys import argv
@@ -112,6 +115,8 @@ argv, xwin = rdarg(argv,"-X",None,cfg.match.xwin)
 argv, ywin = rdarg(argv,"-Y",None,cfg.match.ywin)
 argv, saturate = rdarg(argv,"-max",float,cfg.data.saturate)
 argv, reject = rdarg(argv,"-reject",None,cfg.sex.reject, single=1)
+argv, starmin = rdarg(argv,"-smin",float,cfg.match.starmin)
+argv, dmax = rdarg(argv,"-dmax",float,cfg.match.dmax)
 argv, saturate2 = rdarg(argv,"-max2",float,cfg.data.saturate2)
 argv, skylev = rdarg(argv,"-skylev",None,cfg.data.skylev)
 argv, skylev2 = rdarg(argv,"-skylev2",None,cfg.data.skylev2)
@@ -223,5 +228,6 @@ else:
       sexdir=sexdir, sexcmd=sexcmd, angles=angles, use_db=db, 
       interactive=interactive, diff_size=diff_size, bs=bs, crowd=crowd, 
       usewcs=usewcs, starlist=starlist, magcat=magcat, racol=racol, 
-      deccol=deccol, magcol=magcol) for observation in Observations]
+      deccol=deccol, magcol=magcol, starmin=starmin, maxdist=dmax) \
+      for observation in Observations]
 

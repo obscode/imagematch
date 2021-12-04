@@ -1,8 +1,10 @@
 #!/usr/bin/env python
 
-import matplotlib
-matplotlib.use('Agg')
 import sys
+if '-interactive' not in sys.argv:
+   import matplotlib
+   matplotlib.use("Agg")
+
 import tarfile
 from imagematch.ImageMatching_scalerot import *
 import imagematch

@@ -71,7 +71,7 @@ def median_mask(a, m, axis=0):
    # Now look or places where we have masked bits
    ii,jj = nonzero(sum(m, axis=axis))
    for i,j in zip(ii,jj):
-      med[i,j] = median(a[:,i,j][-m[:,i,j]])
+      med[i,j] = median(a[:,i,j][~m[:,i,j]])
    return med
 
 def make_noise(data, bg, gain=1, rdnoise=0.):

@@ -45,6 +45,8 @@ try:
    from astropy import wcs
 except:
    wcs = None
+from astropy.coordinates import SkyCoord
+from astropy import units as u
 
 try:
    import fit_psf
@@ -438,7 +440,7 @@ class Observation:
       if magcat is not None:
          if self.wcs is None:
             raise AttributeError("To use magcat, you need a WCS in the image")
-         magtab = ascii.read(magcat)
+         magtab = ascii.read(magcat, fill_values=[('...',0)])
          ii,jj = self.wcs.wcs_world2pix(magtab[racol], magtab[deccol], 0)
          self.segmags = np.zeros((self.seg.max()+1,))-999
          for i in range(len(ii)):
@@ -506,6 +508,25 @@ class Observation:
       self.ds = ds*self.scale
       self.da = da
     
+   def IDBadObjs(self):
+      # reject full objects if requested
+      sat_pixels = np.greater(self.data, self.saturate)
+      sat_pixels = np.logical_or(sat_pixels, self.nans)
+      sat_ids = np.nonzero(np.ravel(sat_pixels))
+      sat_objects = np.ravel(self.seg)[sat_ids]
+      if self.magmax or self.magmin:
+         gids = np.greater(self.segmags, -900)
+         if self.magmax: 
+            gids = gids*np.less(self.segmags, self.magmax)
+         if self.magmin: 
+            gids = gids*np.greater(self.segmags, self.magmin)
+         gids[0] = False   # zero is no object
+         sat_objects = np.concatenate([sat_objects,np.nonzero(~gids)[0]])
+      # Now a bit of trickery to find non-repeating set of object numbers:
+      # and segmentation numbers from 1, so remove 1 as index
+      objects = [obj - 1 for obj in list(set(sat_objects))]
+      return objects
+
    def objmatch(self,nord=0,perr=2,aerr=1.0, angles=[0.0],interactive=0,
          use_db=0):
       '''Figure out which objects match up with which other objects in the
@@ -575,22 +596,17 @@ class Observation:
                   np.transpose([self.master.x,self.master.y]),1)
             #np.savetxt('uv0', uv0)
             #np.savetxt('uv1', uv1)
-            # dists[i,j] gives the absolute distance from object i in the 
-            # image to object j in master
-            dists = np.sqrt(np.power(uv0[:,0,NA] - uv1[NA,:,0],2) + \
-                            np.power(uv0[:,1,NA] - uv1[NA,:,1],2))
-            dists = dists*3600/self.scale
-            gids = np.less(dists, perr)
-            if np.sum(np.greater(np.sum(gids, axis=1),0)) < 3:
+            c0 = SkyCoord(uv0[:,0], uv0[:,1], unit=(u.degree, u.degree))
+            c1 = SkyCoord(uv1[:,0], uv1[:,1], unit=(u.degree, u.degree))
+            idx,sep,dist = c0.match_to_catalog_sky(c1)
+            # Those with a proper match
+            gids = np.less(sep.value*3600/self.scale, perr)
+            if np.sum(gids) < 3:
                self.log("Found fewer than 3 matches, try increasing match "
                         "tolerance (-s)")
                return -1
-            # Indicdes of those objects with hits
-            uids0 = np.greater(np.sum(gids, axis=1),0)
-            # Indices of corresponding objects in target frame
-            uids1 = np.argmin(dists, axis=1)[uids0]
-            x0 = self.x[uids0];  y0 = self.y[uids0]
-            x1 = self.master.x[uids1];  y1 = self.master.y[uids1]
+            x0 = self.x[gids];  y0 = self.y[gids]
+            x1 = self.master.x[idx][gids];  y1 = self.master.y[idx][gids]
          else:
             # Do it the hard way...  Look for pairs of ojbects that have
             # the same distances and vector directions. There's probably a
@@ -669,24 +685,33 @@ class Observation:
       # Start off with equal weight to all pixels
       wt = np.ones(x0.shape,np.float32)
 
+      if self.reject:
+         # Reject objects that are saturated or otherwise have bad data
+         bobjs0 = self.IDBadObjs()
+         bobjs1 = self.master.IDBadObjs()
+      else:
+         bobjs0 = []
+         bobjs1 = []
+
+      allx0 = np.array(self.sexdata["X_IMAGE"])
+      ally0 = np.array(self.sexdata["Y_IMAGE"])
+      star0 = np.array(self.sexdata["CLASS_STAR"])
+      if "MAG_BEST" in self.sexdata: 
+         allm0 = np.array(self.sexdata["MAG_BEST"])
+      elif "MAG_AUTO" in self.sexdata: 
+         allm0 = np.array(self.sexdata["MAG_AUTO"])
+      allq0 = np.array(self.sexdata["FLAGS"])
+      allx1 = np.array(self.master.sexdata["X_IMAGE"])
+      ally1 = np.array(self.master.sexdata["Y_IMAGE"])
+      if "MAG_BEST" in self.master.sexdata:
+         allm1 = np.array(self.master.sexdata["MAG_BEST"])
+      elif "MAG_AUTO" in self.master.sexdata: 
+         allm1 = np.array(self.master.sexdata["MAG_AUTO"])
+      allq1 = np.array(self.master.sexdata["FLAGS"])
+         
       # now we iterate on the solution and throw out bad points
       for iter in range(Niter):
          if iter:
-            allx0 = np.array(self.sexdata["X_IMAGE"])
-            ally0 = np.array(self.sexdata["Y_IMAGE"])
-            star0 = np.array(self.sexdata["CLASS_STAR"])
-            if "MAG_BEST" in self.sexdata: 
-               allm0 = np.array(self.sexdata["MAG_BEST"])
-            elif "MAG_AUTO" in self.sexdata: 
-               allm0 = np.array(self.sexdata["MAG_AUTO"])
-            allq0 = np.array(self.sexdata["FLAGS"])
-            allx1 = np.array(self.master.sexdata["X_IMAGE"])
-            ally1 = np.array(self.master.sexdata["Y_IMAGE"])
-            if "MAG_BEST" in self.master.sexdata:
-               allm1 = np.array(self.master.sexdata["MAG_BEST"])
-            elif "MAG_AUTO" in self.master.sexdata: 
-               allm1 = np.array(self.master.sexdata["MAG_AUTO"])
-            allq1 = np.array(self.master.sexdata["FLAGS"])
             if nord == -1:
                ix = allx0 + xshift
                iy = ally0 + yshift
@@ -697,12 +722,22 @@ class Observation:
             delx = ix[::,NA] - allx1[NA,::]
             dely = iy[::,NA] - ally1[NA,::]
             dels = np.sqrt(np.power(delx,2) + np.power(dely,2))
-            delq = np.less_equal(allq0,4)[::,NA]*np.less_equal(allq1,4)[NA,::]*\
-                  np.less_equal(star0,0.8)[::,NA]
+            delq = np.less_equal(allq0,4)[::,NA]*np.less_equal(allq1,4)[NA,::]
+            if getattr(self,'starmin', -1) > 0:
+               delq = delq * np.less_equal(star0,self.starmin)[::,NA]
             dels = np.where(delq,dels,9999)
-            ui0 = [j for j in range(delx.shape[0]) if min(dels[j]) < perr]
-            ui1 = [np.argmin(dels[j]) for j in range(delx.shape[0]) \
-                  if min(dels[j]) < perr]
+            ui0 = [];  ui1 = []
+            for j in range(delx.shape[0]):
+               if min(dels[j]) < perr and j not in bobjs0:
+                  idx = np.argmin(dels[j])
+                  if idx not in bobjs1:
+                     ui0.append(j)
+                     ui1.append(idx)
+
+            #ui0 = [j for j in range(delx.shape[0]) if min(dels[j]) < perr and \
+            #      j not in bobjs0]
+            #ui1 = [np.argmin(dels[j]) for j in range(delx.shape[0]) \
+            #      if min(dels[j]) < perr and np.argmin(dels[j]) not in bobjs1]
             if len(ui0) == 0:
                self.log("Error:  Residuals of coordinate tranformation are all"
                         "greater")
@@ -716,6 +751,10 @@ class Observation:
             f1 = np.power(10,-0.4*(m1-min(m1)))
             # not sure about the point here...
             wt = np.sqrt(f0+f1)# * 0.0 + 1
+            #if self.maxdist is not None and self.snpos is not None:
+            #   sni,snj = self.snpos.topixel()
+            #   dists = np.sqrt((x0 - sni)**2 + (y0 - snj)**2)
+            #   wt = wt*np.less(dists, self.maxdist)
 
             Nmatches = len(x0)
             if nord < nord0:
@@ -940,6 +979,8 @@ class Observation:
 
    def estimate_bg(self, Niter=5):
       '''Estimate the background level.'''
+      if getattr(self, '_bg', None) is not None:
+         return self._bg,self._r
       for uk in range(Niter):
          if uk:
             ukeep = 1.0*between(self.data, bg-4*r, bg+2*r)
@@ -952,7 +993,12 @@ class Observation:
          #d = VTKSubtract(udata, bg)
          d = udata - bg
          r = 1.49*np.median(abs(d))
+         if self.verb > 0:
+            self.log(" BG iter %d: BG=%.3f, sigma=%.3f" % (uk,bg, r))
       self.log("Using %d: BG=%.3f with sigma=%.3f" % (len(udata),bg,r))
+      # Save for multiple calls (good for templates!)
+      self._bg = bg
+      self._r = r
       return bg,r
 
    def mkweight(self):
@@ -980,8 +1026,9 @@ class Observation:
             sat_objects = np.concatenate([sat_objects, np.nonzero(~gids)[0]])
 
          # Retain only stellar objects
-         sat_objects = np.concatenate([sat_objects,
-            self.sexdata['NUMBER'][self.sexdata['CLASS_STAR'] < self.starmin]])
+         if getattr(self,'starmin', -1) > 0:
+            sat_objects = np.concatenate([sat_objects, self.sexdata['NUMBER'][\
+                  self.sexdata['CLASS_STAR'] < self.starmin]])
 
          # Now a bit of trickery to find non-repeating set of object numbers:
          objects = list(set(sat_objects))
@@ -1101,6 +1148,7 @@ class Observation:
             if self.sigimage is not None and self.master.sigimage is not None:
                self.csigma = np.sqrt(np.power(self.sigma,2) + \
                      np.power(self.tsigma, 2))
+            self.fluxrat = 1.0
             return
          else:
             # Full width of the kernel, make it odd
@@ -1255,14 +1303,17 @@ class Observation:
             del sol1,sol2,sol3,du,dv,dw,basis
          if self.skyoff and self.pwid > 0: 
             self.log( "Sky= %f" % (self.psf1[ll]))
-         # Save the flux ratio for later if reversing.
-         self.fluxrat = np.sum(self.psf1[:ll])
-         self.log( "Flux ratio=%f" %(self.fluxrat))
+         fluxrat = np.sum(self.psf1[:ll])
+         self.log( "Flux ratio=%f"%fluxrat)
          if preserve:
+            # Save the flux ratio for later if reversing.
             self.log( "Preserving flux?")
+            self.fluxrat = fluxrat
             self.psf1[:ll] = self.psf1[:ll] / self.fluxrat
-            fluxrat = np.sum(self.psf1[:ll])
-            self.log( "Flux ratio=%f"%fluxrat)
+            self.log( "Flux ratio=%f"%self.fluxrat)
+         else:
+            self.fluxrat = 1.0
+
          if self.verb > 1:
            self.psf2 = np.zeros((pful,pful),np.float64)
            pxs = []
@@ -1444,11 +1495,13 @@ class Observation:
          self.mkmatch(preserve,quick_convolve=quick_convolve)
          if self.verb:
             if self.rev:
-               qdump(self.template,(self.match-self.bg),self.image, 
+               qdump(self.template,
+                     (self.timage-self.tbg)/self.fluxrat*\
+                     self.exptime/self.master.exptime + self.bg,self.image, 
                      extras=[('BACKGND',self.bg)])
             else:
-               qdump(self.template,(self.match-self.tbg),self.master.image,
-                     extras=[('BACKGND',self.tbg)])
+               qdump(self.template,(self.match + self.bg),self.image,
+                     extras=[('BACKGND',self.bg)])
          if self.pwid > -1 and self.verb > 1: qdump(self.psfgrid,self.grid)
       if subt:
          ids = np.indices(self.match.shape)
@@ -1456,29 +1509,33 @@ class Observation:
             if diff_size is not None and snx is not None and sny is not None:
                dists = np.sqrt(np.power(ids[1]-snx,2) + \
                        np.power(ids[0]-sny,2))
-               diff = self.match - \
+               diff = (self.match + self.bg) - \
                      np.where(np.less(dists,diff_size/self.scale),
-                              self.timage/self.fluxrat, 0)
-               fulldiff = (self.match - self.timage/self.fluxrat)
+                              (self.timage - self.tbg)*\
+                              self.exptime/self.master.exptime/self.fluxrat, 0)
+               fulldiff = ((self.match + self.bg) - \
+                     (self.timage - self.tbg)*\
+                     self.exptime/self.master.exptime/self.fluxrat)
             else:
-               diff = (self.match-self.timage/self.fluxrat)
+               diff = ((self.match + self.bg) - \
+                     (self.timage-self.tbg)*\
+                     self.exptime/self.master.exptime/self.fluxrat)
                fulldiff = diff
             qdump(self.difference,diff,self.image, extras=[('BACKGND',self.bg)])
             if self.verb: qdump(self.resids,np.greater(self.wt,0)*fulldiff,self.image)
             if snx is not None and sny is not None:
-               if self.verb: qdump(self.diffpostage, (self.match-self.timage/self.fluxrat)\
+               if self.verb: qdump(self.diffpostage, 
+                     (self.match-self.timage/self.fluxrat)\
                      [int(sny)-200:int(sny)+201,int(snx)-200:int(snx)+201],
                      self.image)
                if self.verb: qdump(self.SNpostage, (self.match)\
                      [int(sny)-200:int(sny)+201,int(snx)-200:int(snx)+201],
                      self.image)
-            if self.verb: qdump(self.SN, (self.match - self.bg), self.image, 
+            if self.verb: qdump(self.SN, (self.match + self.bg), self.image, 
                   extras=[('BACKGND',self.bg)])
             if self.sigma is not None and self.verb:
                qdump(self.SN.replace('.fits','_sigma.fits'), self.sigma, 
                      self.image)
-            if self.verb: qdump(self.template, (self.timage - self.tbg), self.master.image,
-                  extras=[('BACKGND',self.tbg)])
             if self.sigimage is not None and self.master.sigimage is not None:
                # Make the noise map of the difference image
                var = np.power(self.csigma, 2) + np.power(self.master.sigma, 2)
@@ -1505,9 +1562,8 @@ class Observation:
                      [int(sny)-200:int(sny)+201,int(snx)-200:int(snx)+201],
                      self.image)
             if self.verb: qdump(self.SN,self.data,self.image)
-            if self.verb: qdump(self.template,(self.match-self.bg),self.master.image,
-                  extras=[('BACKGND',self.bg)])
-            if self.sigimage is not None and self.master.sigimage is not None and self.verb:
+            if self.sigimage is not None and self.master.sigimage is not None \
+                  and self.verb:
                # Make the noise map of the difference image
                var = np.power(self.csigma, 2) + np.power(self.sigma, 2)
                qdump(self.difference.replace('.fits','_sigma.fits'), 
@@ -1522,17 +1578,37 @@ class Observation:
       fig,axs = plt.subplots(1,3,figsize=(15,5), 
             dpi=rcParams['figure.dpi']*0.7)
       plt.subplots_adjust(wspace=0)
+      #if self.rev:
+      #   data = self.match + self.bg
+      #   temp = (self.timage - self.tbg)*self.exptime/self.master.exptime \
+      #         + self.bg
+      #   diff = (self.match + self.bg) - (self.timage - self.tbg)*\
+      #         self.exptime/self.master.exptime/self.fluxrat
+      #else:
+      #   data = self.data
+      #   temp = (self.match + self.bg)
+      #   diff = (self.data - self.match)
+      if self.rev:
+         data = self.match
+         temp = (self.timage - self.tbg)*self.exptime/self.master.exptime
+         diff = self.match - (self.timage - self.tbg)*\
+               self.exptime/self.master.exptime/self.fluxrat
+      else:
+         data = self.data - self.bg
+         temp = self.match
+         diff = self.data - self.bg - self.match
+
       if self.snpos is not None:
          snx,sny = self.snpos.topixel()
          snx = int(snx)
          sny = int(sny)
-         sno = self.data[sny-200:sny+200,snx-200:snx+200]
-         snt = (self.match+self.bg)[sny-200:sny+200,snx-200:snx+200]
-         snd = (self.data-self.match)[sny-200:sny+200,snx-200:snx+200]
+         sno = data[sny-200:sny+200,snx-200:snx+200]
+         snt = temp[sny-200:sny+200,snx-200:snx+200]
+         snd = diff[sny-200:sny+200,snx-200:snx+200]
       else:
-         sno = self.data
-         snt = self.match + self.bg
-         snd = self.data - self.match
+         sno = data
+         snt = temp
+         snd = diff
 
       norm = simple_norm(snd, percent=99)
       axs[0].imshow(sno, origin='lower', norm=norm, cmap='gray_r')

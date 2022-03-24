@@ -16,8 +16,9 @@
   02/13/2020:  Ack, 10 years later!  Trying to port this to more common
                 modules and python 3
 '''
+import gc
 import time,os
-from .fitsutils import qdump
+from .fitsutils import qdump, qload
 from .VTKHelperFunctions import *  # all start with VTK, so this is okay :)
 from .ReadSex import readsex
 from photutils import detect_threshold,detect_sources,Background2D
@@ -26,6 +27,7 @@ from photutils import source_properties
 from photutils.utils import calc_total_error
 from astropy.convolution import Gaussian2DKernel
 from astropy.io import fits as FITS
+from astropy.io import ascii
 import numpy.fft as fft
 import numpy as np
 from .GaussianBG import GaussianBG
@@ -39,6 +41,7 @@ debug = 1
 try:
    from . import Picker
    from matplotlib import pyplot as plt
+   from matplotlib import rcParams
    from astropy.visualization import simple_norm
 except:
    Picker = None
@@ -47,6 +50,8 @@ try:
    from astropy import wcs
 except:
    wcs = None
+from astropy.coordinates import SkyCoord
+from astropy import units as u
 
 try:
    import fit_psf
@@ -261,15 +266,21 @@ class Observation:
    def __init__(self,image,wt=None,scale='scale',pakey="rotangle",
          saturate=30000, skylev=None, sigsuf=None, wtype="MAP_RMS", 
          mask_file=None, reject=0, snx=None, sny=None, snmaskr=10.0, 
-         extra_sufs=[], hdu=0, minarea=10):
+         extra_sufs=[], hdu=0, minarea-10, magmin=None, magmax=None, 
+         store_bg=True):
 
       self.image = image   # The image name
       self.hdu = hdu
+      self.magmin = magmin
+      self.magmax = magmax
+      self.store_bg = store_bg
 
       # Keep a logfile
-      self.log_stream = open(self.image.replace('.fits','')+'.log', 'w')
+      #self.log_stream = open(self.image.replace('.fits','')+'.log', 'w')
+      self.log_stream = None
 
-      base = os.path.basename(image)
+      #base = os.path.basename(image)
+      base = image
       self.catalog = base.replace(".fits",".cat")  # Output catalog of objects
       # Error maps
       if sigsuf: 
@@ -299,8 +310,12 @@ class Observation:
       self.psfgrid = base.replace(".fits","grid.fits")
       # Name of output image with the final mask used
       self.masked = base.replace(".fits","mask.fits")
+      # Name of weight FITS image
+      self.weight = base.replace(".fits","weight.fits")
       # Name of output difference image
       self.difference = base.replace(".fits","diff.fits") # difference image
+      # Name of difference image with positive weight
+      self.resids = base.replace(".fits","resids.fits")
       # Name of optinal (400x400) output cutout around SN
       self.SNpostage = base.replace(".fits","SNpost.fits")
       # Name of optinal (400x400) output cutout around difference
@@ -322,20 +337,23 @@ class Observation:
       self.reject = reject              # completely reject saturated objects?
 
       # Try to figure some stuff out from the header
-      f = FITS.open(self.image)
-      self.epoch = f[hdu].header.get("epoch", "N/A")
-      self.exptime = f[hdu].header.get("exptime", "N/A")
+      #f = FITS.open(self.image, memmap=False)
+      header,d = qload(self.image, hdu)
+      self.epoch = header.get("epoch", "N/A")
+      try:
+         self.exptime = float(header.get("exptime", 1.0))
+      except:
+         self.exptime = 1.0
       if self.epoch == "N/A": self.epoch = -99
-      if self.exptime == "N/A": self.exptime = 1.0
       if type(scale) is type(""):
-         self.scale = f[hdu].header.get(scale, "N/A")
+         self.scale = header.get(scale, "N/A")
          if self.scale == 'N/A':
             raise AttributeError("Scale keyword not found: {}".format(scale))
       else:
          self.scale = scale
       self.minarea = minarea
       if skylev is not None:
-         self.skylev = f[hdu].header.get(skylev, "N/A")
+         self.skylev = header.get(skylev, "N/A")
          if self.skylev == 'N/A':
             raise AttributeError("Sky level keyword not found: {}".format(\
                scale))
@@ -350,8 +368,8 @@ class Observation:
          try:
             self.snpos = Point(snx, sny, self)
          except:
-            snx = f[hdu].header.get(snx, "N/A")
-            sny = f[hdu].header.get(sny, "N/A")
+            snx = header.get(snx, "N/A")
+            sny = header.get(sny, "N/A")
             if snx == 'N/A' or sny == 'N/A':
                raise AttributeError('SN position keywords not found')
             self.snpos = Point(snx,sny, self)
@@ -370,9 +388,9 @@ class Observation:
             self.mask.add_mask(x0,y0,x1,y1, sense='inside')
             self.log('Adding mask: %s %s %s %s' % (x0,y0,x1,y1))
          mf.close()
-      self.pa = f[hdu].header.get(pakey, "N/A")
+      self.pa = header.get(pakey, "N/A")
       if self.pa == "N/A": self.pa = 0.0
-      f.close()
+      #f.close()
       self.data = None
       self.nans = None   # where the data are NaN
       self.master = None
@@ -446,18 +464,39 @@ class Observation:
       self.sexcom += ["-SATUR_LEVEL "+str(self.saturate)]
       self.sexcom += ["-DEBLEND_MINCONT 1"]
       self.sexcom += ["-VERBOSE_TYPE QUIET"]
+      if self.zp is not None:
+         self.sexcom += ["-MAG_ZEROPOINT " + str(self.zp)]
       self.sexcom = ' '.join(self.sexcom)
       if self.verb:
          self.log("Running {}".format(self.sexcom))
       os.system(self.sexcom)
 
-   def readcat(self):
+   def readcat(self, magcat=None, racol='RA', deccol='DEC', magcol='rmag'):
       '''Read the SExtractor output.'''
       if self.do_sex:  self.sex()
       self.sexdata = readsex(self.catalog)[0]
-      f = FITS.open(self.segmap)
-      self.seg = f[self.hdu].data
-      f.close()
+      self.sexdata['CLASS_STAR'] = np.array(self.sexdata['CLASS_STAR'])
+      self.sexdata['NUMBER'] = np.array(self.sexdata['NUMBER'])
+      #f = FITS.open(self.segmap, memmap=False)
+      #self.seg = f[self.hdu].data
+      h,self.seg = qload(self.segmap, self.hdu)
+      #f.close()
+      # read magnitude data
+      if magcat is not None:
+         if self.wcs is None:
+            raise AttributeError("To use magcat, you need a WCS in the image")
+         magtab = ascii.read(magcat, fill_values=[('...',0)])
+         ii,jj = self.wcs.wcs_world2pix(magtab[racol], magtab[deccol], 0)
+         self.segmags = np.zeros((self.seg.max()+1,))-999
+         for i in range(len(ii)):
+            if not 0 < jj[i] < self.data.shape[0] or \
+               not 0 < ii[i] < self.data.shape[1]:
+               continue
+            obj_id = self.seg[int(jj[i]),int(ii[i])]
+            if obj_id > 0:
+               self.segmags[obj_id] = magtab[i][magcol]
+      else:
+         self.segmags = self.sexdata['MAG_APER']
 
    def getSources(self):
       '''Read in the previously determined source catalog and segmentation 
@@ -526,6 +565,25 @@ class Observation:
       self.ds = ds*self.scale
       self.da = da
     
+   def IDBadObjs(self):
+      # reject full objects if requested
+      sat_pixels = np.greater(self.data, self.saturate)
+      sat_pixels = np.logical_or(sat_pixels, self.nans)
+      sat_ids = np.nonzero(np.ravel(sat_pixels))
+      sat_objects = np.ravel(self.seg)[sat_ids]
+      if self.magmax or self.magmin:
+         gids = np.greater(self.segmags, -900)
+         if self.magmax: 
+            gids = gids*np.less(self.segmags, self.magmax)
+         if self.magmin: 
+            gids = gids*np.greater(self.segmags, self.magmin)
+         gids[0] = False   # zero is no object
+         sat_objects = np.concatenate([sat_objects,np.nonzero(~gids)[0]])
+      # Now a bit of trickery to find non-repeating set of object numbers:
+      # and segmentation numbers from 1, so remove 1 as index
+      objects = [obj - 1 for obj in list(set(sat_objects))]
+      return objects
+
    def objmatch(self,nord=0,perr=2,aerr=1.0, angles=[0.0],interactive=0,
          use_db=0):
       '''Figure out which objects match up with which other objects in the
@@ -594,24 +652,19 @@ class Observation:
             uv0 = self.wcs.wcs_pix2world(np.transpose([self.x,self.y]),1)
             uv1 = self.master.wcs.wcs_pix2world(
                   np.transpose([self.master.x,self.master.y]),1)
-            np.savetxt('uv0', uv0)
-            np.savetxt('uv1', uv1)
-            # dists[i,j] gives the absolute distance from object i in the 
-            # image to object j in master
-            dists = np.sqrt(np.power(uv0[:,0,NA] - uv1[NA,:,0],2) + \
-                            np.power(uv0[:,1,NA] - uv1[NA,:,1],2))
-            dists = dists*3600/self.scale
-            gids = np.less(dists, perr)
-            if np.sum(np.greater(np.sum(gids, axis=1),0)) < 3:
+            #np.savetxt('uv0', uv0)
+            #np.savetxt('uv1', uv1)
+            c0 = SkyCoord(uv0[:,0], uv0[:,1], unit=(u.degree, u.degree))
+            c1 = SkyCoord(uv1[:,0], uv1[:,1], unit=(u.degree, u.degree))
+            idx,sep,dist = c0.match_to_catalog_sky(c1)
+            # Those with a proper match
+            gids = np.less(sep.value*3600/self.scale, perr)
+            if np.sum(gids) < 3:
                self.log("Found fewer than 3 matches, try increasing match "
                         "tolerance (-s)")
                return -1
-            # Indicdes of those objects with hits
-            uids0 = np.greater(np.sum(gids, axis=1),0)
-            # Indices of corresponding objects in target frame
-            uids1 = np.argmin(dists, axis=1)[uids0]
-            x0 = self.x[uids0];  y0 = self.y[uids0]
-            x1 = self.master.x[uids1];  y1 = self.master.y[uids1]
+            x0 = self.x[gids];  y0 = self.y[gids]
+            x1 = self.master.x[idx][gids];  y1 = self.master.y[idx][gids]
          else:
             # Do it the hard way...  Look for pairs of ojbects that have
             # the same distances and vector directions. There's probably a
@@ -678,8 +731,8 @@ class Observation:
       # Check to see if we have enough matches to constrain the transformation
       # If not, reduce the order.
       Ncoeff = ndf(nord)
+      nord0 = nord   # in case we have to decrease
       if 2*Nmatches < Ncoeff:
-         nord0 = nord
          self.log("You have fewer than %d matches, trying a lower " % \
                (Ncoeff/2) + "order transformation")
          nord -= 1
@@ -690,23 +743,36 @@ class Observation:
       # Start off with equal weight to all pixels
       wt = np.ones(x0.shape,np.float32)
 
+      if self.reject:
+         # Reject objects that are saturated or otherwise have bad data
+         bobjs0 = self.IDBadObjs()
+         bobjs1 = self.master.IDBadObjs()
+      else:
+         bobjs0 = []
+         bobjs1 = []
+
+      allx0 = np.array(self.sexdata["X_IMAGE"])
+      ally0 = np.array(self.sexdata["Y_IMAGE"])
+      star0 = np.array(self.sexdata["CLASS_STAR"])
+      if "MAG_BEST" in self.sexdata: 
+         allm0 = np.array(self.sexdata["MAG_BEST"])
+      elif "MAG_AUTO" in self.sexdata: 
+         allm0 = np.array(self.sexdata["MAG_AUTO"])
+      allq0 = np.array(self.sexdata["FLAGS"])
+      allx1 = np.array(self.master.sexdata["X_IMAGE"])
+      ally1 = np.array(self.master.sexdata["Y_IMAGE"])
+      if "MAG_BEST" in self.master.sexdata:
+         allm1 = np.array(self.master.sexdata["MAG_BEST"])
+      elif "MAG_AUTO" in self.master.sexdata: 
+         allm1 = np.array(self.master.sexdata["MAG_AUTO"])
+      allq1 = np.array(self.master.sexdata["FLAGS"])
+
+      np.savetxt('pass0_matches.np',[x0,y0,x1,y1])
+      np.savetxt('allx0s.np', [allx0,ally0])
+      np.savetxt('allx1s.np', [allx1,ally1])
       # now we iterate on the solution and throw out bad points
       for iter in range(Niter):
          if iter:
-            allx0 = np.array(self.sexdata["X_IMAGE"])
-            ally0 = np.array(self.sexdata["Y_IMAGE"])
-            if "MAG_BEST" in self.sexdata.colnames: 
-               allm0 = np.array(self.sexdata["MAG_BEST"])
-            elif "MAG_AUTO" in self.sexdata.colnames: 
-               allm0 = np.array(self.sexdata["MAG_AUTO"])
-            allq0 = np.array(self.sexdata["FLAGS"])
-            allx1 = np.array(self.master.sexdata["X_IMAGE"])
-            ally1 = np.array(self.master.sexdata["Y_IMAGE"])
-            if "MAG_BEST" in self.sexdata.colnames:
-               allm1 = np.array(self.master.sexdata["MAG_BEST"])
-            elif "MAG_AUTO" in self.sexdata.colnames: 
-               allm1 = np.array(self.master.sexdata["MAG_AUTO"])
-            allq1 = np.array(self.master.sexdata["FLAGS"])
             if nord == -1:
                ix = allx0 + xshift
                iy = ally0 + yshift
@@ -718,23 +784,45 @@ class Observation:
             dely = iy[::,NA] - ally1[NA,::]
             dels = np.sqrt(np.power(delx,2) + np.power(dely,2))
             delq = np.less_equal(allq0,4)[::,NA]*np.less_equal(allq1,4)[NA,::]
+            if getattr(self,'starmin', -1) > 0:
+               delq = delq * np.less_equal(star0,self.starmin)[::,NA]
             dels = np.where(delq,dels,9999)
-            ui0 = [j for j in range(delx.shape[0]) if min(dels[j]) < perr]
-            ui1 = [np.argmin(dels[j]) for j in range(delx.shape[0]) \
-                  if min(dels[j]) < perr]
+            ui0 = [];  ui1 = []
+            for j in range(delx.shape[0]):
+               if min(dels[j]) < perr and j not in bobjs0:
+               #if min(dels[j]) < tol and j not in bobjs0:
+                  idx = np.argmin(dels[j])
+                  if idx not in bobjs1:
+                     ui0.append(j)
+                     ui1.append(idx)
+
+            #ui0 = [j for j in range(delx.shape[0]) if min(dels[j]) < perr and \
+            #      j not in bobjs0]
+            #ui1 = [np.argmin(dels[j]) for j in range(delx.shape[0]) \
+            #      if min(dels[j]) < perr and np.argmin(dels[j]) not in bobjs1]
             if len(ui0) == 0:
                self.log("Error:  Residuals of coordinate tranformation are all"
                         "greater")
                self.log("than one pixel.  Try with smaller order.")
-               if self.verb > 1:
-                  fig.save('match.pdf')
                return -1
             x0,y0,m0 = np.take([allx0,ally0,allm0],ui0,1)
             x1,y1,m1 = np.take([allx1,ally1,allm1],ui1,1)
+            np.savetxt('pass{}_matches.np'.format(iter),[x0,y0,x1,y1])
+
             f0 = np.power(10,-0.4*(m0-min(m0)))
             f1 = np.power(10,-0.4*(m1-min(m1)))
             # not sure about the point here...
-            wt = np.sqrt(f0+f1) * 0.0 + 1
+            wt = np.sqrt(f0+f1)# * 0.0 + 1
+            #if self.maxdist is not None and self.snpos is not None:
+            #   sni,snj = self.snpos.topixel()
+            #   dists = np.sqrt((x0 - sni)**2 + (y0 - snj)**2)
+            #   wt = wt*np.less(dists, self.maxdist)
+
+            Nmatches = len(x0)
+            if nord < nord0:
+               # Try to re-increase the order to what was asked for originally
+               while 2*Nmatches > ndf(nord) and nord <= nord0:
+                  nord += 1
          if nord == -1:
             # simple offset
             xshift = np.sum(wt*(x1-x0))/np.sum(wt)
@@ -750,7 +838,8 @@ class Observation:
             ixy = np.add.reduce(sol[NA,::]*basis,1)
             ix,iy = ixy[:len(np.ravel(x0))], ixy[len(np.ravel(x0)):]
 
-         self.log( "Pass %d, with %d objects." % (iter+1,len(x0)))
+         Nmatches = len(x0)
+         self.log( "Pass %d, with %d objects." % (iter+1,Nmatches))
          if nord==-1:
             self.log("  xshift: %.3f   yshift:  %.3f" % tuple(sol[0:2]))
          elif nord == 0:
@@ -789,10 +878,26 @@ class Observation:
    def imread(self, bs=False, usewcs=False):
       '''Read in the FITS data and assign to the member variables.  
       Optionall background subtract if bs=True'''
-      if self.data == None:
+      if self.data is None:
          self.log( "Now reading frames for %s" % (self))
-         f = FITS.open(self.image)
-         self.data = f[self.hdu].data.astype(np.float32)
+         #f = FITS.open(self.image, memmap=False)
+         #self.data = f[self.hdu].data.astype(np.float32)
+         h,self.data = qload(self.image, self.hdu)
+         self.data = self.data*1.0
+         #h = FITS.getheader(self.image, self.hdu)
+         if 'ZP' in h:
+            if type(h['ZP']) is type(1.0):
+               self.zp = h['ZP']
+            else:
+               print("Warning: FITS header ZP is present, but not a float")
+               self.zp = None
+         else:
+            self.zp = None
+
+         # Check for previously determind BG and SD
+         if self.store_bg and 'IMMATBG' in h:
+            self._bg = h['IMMATBG']
+            self._r = h['IMMATSD']
 
          # Check for NaNs
          self.nans = np.isnan(self.data)
@@ -806,7 +911,7 @@ class Observation:
 
          # see if there is WCS info in the header
          if usewcs and wcs is not None:
-            self.wcs = wcs.WCS(f[self.hdu].header)
+            self.wcs = wcs.WCS(h)
             #if self.wcs.types[0] is None or self.wcs.types[1] is None:
             #   # Bad WCS
             #   self.wcs = None
@@ -818,17 +923,18 @@ class Observation:
          if bs:
             self.data = self.data - GaussianBG(np.ravel(self.data).astype(
                                                np.float32),101)
-         self.naxis1,self.naxis2 = f[self.hdu].header['NAXIS1'],\
-                                   f[self.hdu].header['NAXIS2']
-         f.close()
+         self.naxis1,self.naxis2 = h['NAXIS1'],\
+                                   h['NAXIS2']
+         #f.close()
          if self.master: 
             self.master.imread(bs=bs, usewcs=usewcs)
 
          if self.sigimage is not None:
             self.log( "Reading in sigma map %s" % self.sigimage)
-            f = FITS.open(self.sigimage)
-            self.sigma = f[self.hdu].data.astype(np.float32)
-            f.close()
+            #f = FITS.open(self.sigimage, memmap=False)
+            #self.sigma = f[self.hdu].data.astype(np.float32)
+            #f.close()
+            h,self.sigma = qload(self.sigimage, self.hdu)
          else:
             self.sigma = None
 
@@ -836,9 +942,10 @@ class Observation:
             self.extras = []
             for xmap in self.extra_maps:
                self.log("Reading in extra map %s" % xmap)
-               f = FITS.open(xmap)
-               self.extras.append(f[self.hdu].data.astype(np.float32))
-               f.close()
+               #f = FITS.open(xmap, memmap=False)
+               #self.extras.append(f[self.hdu].data.astype(np.float32))
+               #f.close()
+               self.extras.append(qload(xmap, self.hdu)[1])
          else:
             self.extras = None
 
@@ -854,6 +961,14 @@ class Observation:
          sat_pixels_m = np.logical_or(sat_pixels_m, self.master.nans)
          sat_ids_m = np.nonzero(np.ravel(sat_pixels_m))
          sat_objects_m = np.ravel(self.master.seg)[sat_ids_m]
+         if self.master.magmax or self.master.magmin:
+            gids = np.greater(self.master.segmags, -900)
+            if self.master.magmax: 
+               gids = gids*np.less(self.master.segmags, self.master.magmax)
+            if self.master.magmin: 
+               gids = gids*np.greater(self.master.segmags, self.master.magmin)
+            gids[0] = False   # zero is no object
+            sat_objects_m = np.concatenate([sat_objects_m,np.nonzero(~gids)[0]])
          # Now a bit of trickery to find non-repeating set of object numbers:
          objects_m = list(set(sat_objects_m))
          for obj in objects_m:
@@ -894,7 +1009,8 @@ class Observation:
                mode='constant', cval=0)
          #self.timage = VTKImageTransform(mimage,self.tx,self.ty,numret=1,
          #                                cubic=0,interp=1,constant=0)
-         qdump(self.rectemp, self.timage, self.master.image)
+         if self.verb:
+            qdump(self.rectemp, self.timage, self.master.image)
          if self.master.sigimage is not None:
             self.log( "Transforming sigma map...")
             bpm = np.less(self.master.sigma,0)*1.0
@@ -939,21 +1055,6 @@ class Observation:
       self.bg_rms = bkg.background_rms
       return self.bg_img,self.bg_rms
 
-      #for uk in range(Niter):
-      #   if uk:
-      #      ukeep = 1.0*between(self.data, bg-4*r, bg+2*r)
-      #      ukeep = 1.0*np.equal(VTKConvolve(ukeep, k=5, numret=1),1.0)
-      #      udata = np.compress(ukeep.ravel(), self.data.ravel())
-      #   else:
-      #      udata = self.data.ravel()
-      #   
-      #   bg = GaussianBG(udata,99)
-      #   #d = VTKSubtract(udata, bg)
-      #   d = udata - bg
-      #   r = 1.49*np.median(abs(d))
-      #   self.log("Using %d: BG=%.3f with sigma=%.3f" % (len(udata),bg,r))
-      #return bg,r
-
    def mkweight(self):
       '''This function works out the weight of the image, based on the noise
       in the background and the segmentation found by sextractor.  This is
@@ -971,6 +1072,17 @@ class Observation:
          sat_pixels = np.logical_or(sat_pixels, self.nans)
          sat_ids = np.nonzero(np.ravel(sat_pixels))
          sat_objects = np.ravel(self.seg)[sat_ids]
+         if self.magmax or self.magmin:
+            gids = np.greater(self.segmags, -900)
+            if self.magmax: gids = gids*np.less(self.segmags, self.magmax)
+            if self.magmin: gids = gids*np.greater(self.segmags, self.magmin)
+            gids[0] = False   # zero is no object
+            sat_objects = np.concatenate([sat_objects, np.nonzero(~gids)[0]])
+
+         # Retain only stellar objects
+         if getattr(self,'starmin', -1) > 0:
+            sat_objects = np.concatenate([sat_objects, self.sexdata['NUMBER'][\
+                  self.sexdata['CLASS_STAR'] < self.starmin]])
 
          # Now a bit of trickery to find non-repeating set of object numbers:
          objects = list(set(sat_objects))
@@ -981,7 +1093,8 @@ class Observation:
 
       # Throug out any pixeles that don't have an object
       seg = np.greater(self.seg,0.0).astype(np.float32)
-      mseg = np.greater(self.mseg,0.0).astype(np.float32)
+      # put limit at 0.5, because mseg was transformed
+      mseg = np.greater(self.mseg,0.5).astype(np.float32)
 
       gwid = max([2,1*self.pwid])
       bg,r = self.estimate_bg()
@@ -1004,6 +1117,7 @@ class Observation:
       # note by using np.less(zids, 0.02), we're effectively doing a fuzzy 
       #  'not'
       wt = VTKMultiply(seg, VTKMultiply(mseg, np.less(zids, 0.02)))
+      print(np.sum(np.greater(wt, 0)))
 
       # throw out data that have very low values
       lowids = np.less(self.data, self.bg-5*r).astype(np.float32)
@@ -1032,9 +1146,12 @@ class Observation:
          snx,sny = self.snpos.topixel()
          dists = np.power(self.ox-snx, 2) + np.power(self.oy-sny, 2)
          cond = np.greater(dists, (self.snmaskr/self.scale)**2)
+         if self.maxdist > 0:
+            cond = cond*np.less(dists, self.maxdist**2)
          wt = VTKMultiply(wt, cond.astype(np.float32))
 
       # Get rid of any saturated pixels
+
       swt = VTKGreaterEqual(self.data,self.saturate)
       twt = VTKGreaterEqual(self.timage,self.master.saturate)
       swt = VTKDilate(VTKOr(swt,twt),5,5,numret=1)
@@ -1054,185 +1171,207 @@ class Observation:
          wt = VTKIslandRemoval(wt,1.0,0.0,max([3,self.pwid])**2,numret=1)
       self.wt = wt.astype(np.float32)
 
-
-   def mkmatch(self,preserve,quick_convolve=0):
+   def mkmatch(self,preserve,quick_convolve=0, Niter=1):
       '''Here's where the kernel is solved.  Need to work on comments here.
       Right now, it's pretty black-box.'''
-      wtflat = np.ravel(self.wt)
+      data = self.data - self.bg
 
       # Try to get counts on same scale
-      self.timage = self.timage * (self.exptime/self.master.exptime)
-      self.log( "Using %d pixels." % (np.sum(1.0*np.greater(wtflat,0))))
-      if self.pwid == -1:
-         # Just solving for a flux ratio
-         flux = np.sum(wtflat*np.ravel(self.data))/\
-               np.sum(wtflat*np.ravel(self.timage))
-         self.log( "Flux ratio = %.4f" % (flux))
-         self.match = flux*self.timage
-         if self.sigimage is not None and self.master.sigimage is not None:
-            self.csigma = np.sqrt(np.power(self.sigma,2) + \
-                  np.power(self.tsigma, 2))
-      else:
-         # Full width of the kernel, make it odd
-         pful = int(2*self.pwid+1)
-         owid = self.pwid + 1.0
-         # These are indices of the side of a box containing the kernel
-         pbox = np.arange(-self.pwid,self.pwid+0.5,1.0).astype(np.int32)
-         # These are the indices in the pbox that correspond to being
-         # inside a circular aperture.
-         self.ii = np.array([i for i in pbox for j in pbox \
-                          if (i*i+j*j)<=owid**2 or 0])
-         self.jj = np.array([j for i in pbox for j in pbox \
-                          if (i*i+j*j)<=owid**2 or 0])
-         ll = len(self.ii)
-         self.log( "Constructing bases.")
-         # The construction of bases depends on the image data or the template
-         #  (depending on direction), whether or not there is a sky offset
-         #  and whether or not there is spatial variation.
-         it0 = time.time()
-         basis_sigma = None
-         if self.rev:
-            f0 = np.compress(wtflat,wtflat*np.ravel(self.timage))
-            n0 = np.compress(wtflat,np.ravel(self.invnoise))
-            basisimage = self.data
-            if self.sigimage is not None:
-               # make a variance map 
-               basis_sigma = np.power(self.sigma, 2)
+      timage = (self.timage - self.tbg) * (self.exptime/self.master.exptime)
+      for i in range(Niter):
+         if i == 0:
+            # First time through
+            wtflat = np.ravel(self.wt)
          else:
-            f0 = np.compress(wtflat,wtflat*np.ravel(self.data))
-            n0 = np.compress(wtflat,np.ravel(self.invnoise))
-            basisimage = self.timage
-            if self.master.sigimage is not None:
-               basis_sigma = np.power(self.tsigma, 2)
-         step = ll/79 + 1  # for performance meter
-         cwt = np.compress(wtflat,wtflat)
-         # i,j indeces of masked image
-         coy,cox = np.compress(wtflat, 
-            [np.ravel(self.oy), np.ravel(self.ox)], 1).astype(np.int32)
-         flatimage = np.ravel(basisimage)
-         basis = []
-         for k in range(ll):
-            basis.append(cwt*np.take(flatimage,
-                  (coy+self.jj[k])*self.naxis1 + (cox+self.ii[k])))
-            if k % step == 0:
-               sys.stdout.write(".")
-               sys.stdout.flush()
+            # after first time throug:  throw out outliers.
+            # index numbers where we have non-zero weights
+            ids = np.nonzero(np.greater(wtflat, 0))[0]
+            # expected noise at those locations
+            sig = np.power(n0, -1)
+            # where the residuals exceed 5*noise
+            bids = np.greater(np.absolute(resid), 5*sig)
+            # set them to zero in the original weight-map
+            wtflat[ids[bids]] = 0
 
-         if self.skyoff: basis = np.concatenate([basis,
-            [np.ones(f0.shape,np.float64)]])
-         basis = np.asarray(basis)
-         if self.spatial:
-             self.oxl = (self.ox-self.naxis1/2.0)/(self.naxis1/2.0)
-             woxl = np.compress(wtflat,np.ravel(self.oxl))
-             self.oyl = (self.oy-self.naxis2/2.0)/(self.naxis2/2.0)
-             woyl = np.compress(wtflat,np.ravel(self.oyl))
-             xbasis = [b*woxl for b in basis[:-1]]
-             ybasis = [b*woyl for b in basis[:-1]]
-             basis = np.concatenate([basis,xbasis,ybasis])
-         it1 = time.time()
-         self.log( "Bases constructed in %.4fs." % (it1-it0))
-         self.log( "Decomposition.")
-         it0 = time.time()
-         self.log( "Size of basis matrix:")
-         self.log(str(basis.shape))
-         du,dv,dw = singular_value_decomposition(np.transpose(basis))
-         it1 = time.time()
-         self.log( "Decomposition in %.4fs." % (it1-it0))
-         bases = []
-         for sol1a in dw:
-             psf2 = np.zeros((pful,pful),np.float64)
-             for k in range(ll):
-                 py = self.jj[k]+self.pwid
-                 px = self.ii[k]+self.pwid
-                 pr = np.sqrt(self.jj[k]**2 + self.ii[k]**2)
-                 psf2[py,px] = sol1a[k]
-             bases.append(psf2)
-         bases = np.asarray(bases)
-         npsx = int(np.sqrt(bases.shape[0]))+1
-         npsy = bases.shape[0]//npsx + 1
-         imbases = np.zeros((npsy*(bases.shape[1]+5), 
-                             npsx*(bases.shape[2]+5)), np.float64)
-         imb1 = 0
-         for j in range(npsy):
-           for i in range(npsx):
-              y0 = j*(bases.shape[1]+5)
-              y1 = y0 + bases.shape[1]
-              x0 = i*(bases.shape[2]+5)
-              x1 = x0 + bases.shape[2]
-              imbases[y0:y1,x0:x1] = bases[imb1,::-1,::]
-              imb1 += 1
-              if imb1 == len(bases): break
-         imbases = imbases[::-1]
-         qdump(self.imbases,imbases,self.image)
-         if self.verb > 1: self.log( dv)
-         sol1 = np.transpose(dw)
-         if self.mcut and self.mcut < len(dv):
-             self.log( "Ratio of first eigenvalue with last ten:")
-             rdv = dv[0]/dv
-             self.log( rdv[-10:])
-             qdump(self.rdv,rdv)
-             dv[self.mcut:] = 0 * dv[self.mcut:]
-             sol2 = divz(1,dv[:self.mcut])
-             sol3 = np.dot(np.transpose(du[::,:self.mcut]),f0)
-             self.psf1 = np.dot(sol1[::,:self.mcut], (sol2*sol3))
-             fitted = np.add.reduce(self.psf1[::,NA]*basis,0)
-             resid = fitted - f0
-             vc = dv[0]/dv[self.mcut-1]
-             umean = np.mean(resid)
-             urms = np.sqrt(np.mean(np.power(resid,2)))
-             uchi2 = np.sum(np.power(resid*n0,2))
-             uchi2u = uchi2 / (len(resid)-self.mcut)
-             self.log( "(CUT,MEAN,RMS,CHI2,RCHI2) = "
-                       "(%9.1f,%12.6f,%12.6f,%12.6f,%12.6f)"\
-                             % (vc,umean,urms,uchi2,uchi2u))
+ 
+         self.log( "Using %d pixels." % (np.sum(1.0*np.greater(wtflat,0))))
+         if self.pwid == -1:
+            # Just solving for a flux ratio
+            flux = np.sum(wtflat*np.ravel(data))/\
+                  np.sum(wtflat*np.ravel(timage))
+            self.log( "Flux ratio = %.4f" % (flux))
+            self.match = flux*timage
+            resid = np.compress(wtflat, np.ravel(data)) -\
+                    np.compress(wtflat, np.ravel(timage))
+            if self.sigimage is not None and self.master.sigimage is not None:
+               self.csigma = np.sqrt(np.power(self.sigma,2) + \
+                     np.power(self.tsigma, 2))
+            self.fluxrat = 1.0
+            return
          else:
-             self.log( "Ratio of first eigenvalue with last ten:")
-             rdv = 1.0/dv
-             self.log( str(rdv[-10:]))
-             qdump(self.rdv,rdv)
-             cdv = np.zeros(rdv.shape,np.float64)
-             if self.vcut == 0: ucv = [0,1]
-             else: ucv = [1]
-             for cv in ucv:
-                if cv:
-                    if self.vcut == 0:
-                       qdump("cdv.fits",rdv - cdv)
-                       tck = splrep(np.arange(len(dv)),rdv-cdv,k=1,s=0)
-                       vloc = sproot(tck,mest=len(dv))
-                       vloc = int(vloc[0])
-                       self.vcut = 10*rdv[vloc]
-                    rdv = [self.vcut]
-                    self.log( "Cutting at %1f." % (self.vcut))
-                for jvc in range(len(rdv)):
-                    vc = rdv[jvc]
-                    udv = 1.0*np.greater_equal(dv,max(dv)/vc)
-                    jcut = int(np.sum(udv))
-                    if cv: self.log( "Using %d out of %d." % \
-                          (np.sum(udv),len(udv)))
-                    sol2 = divz(1,dv[:jcut])
-                    sol3 = np.dot(np.transpose(du[::,:jcut]),f0)
-                    self.psf1 = np.dot(sol1[::,:jcut], (sol2*sol3))
-                    fitted = np.add.reduce(self.psf1[::,NA]*basis,0)
-                    resid = fitted - f0
-                    umean = np.mean(resid)
-                    urms = np.sqrt(np.mean(np.power(resid,2)))
-                    uchi2 = np.sum(np.power(divz(resid,n0),2))
-                    uchi2u = uchi2 / (len(resid)-self.mcut)
-                    if not cv: cdv[jvc] = urms
-                    self.log( "(CUT,MEAN,RMS,CHI2,RCHI2) = "
-                              "(%9.1f,%12.6f,%12.6f,%12.6f,%12.6f)" \
-                                    % (vc,umean,urms,uchi2,uchi2u))
-         del sol1,sol2,sol3,du,dv,dw,basis
-         if self.skyoff: 
+            # Full width of the kernel, make it odd
+            pful = int(2*self.pwid+1)
+            owid = self.pwid + 1.0
+            # These are indices of the side of a box containing the kernel
+            pbox = np.arange(-self.pwid,self.pwid+0.5,1.0).astype(np.int32)
+            # These are the indices in the pbox that correspond to being
+            # inside a circular aperture.
+            self.ii = np.array([i for i in pbox for j in pbox \
+                             if (i*i+j*j)<=owid**2 or 0])
+            self.jj = np.array([j for i in pbox for j in pbox \
+                             if (i*i+j*j)<=owid**2 or 0])
+            ll = len(self.ii)
+            self.log( "Constructing bases.")
+            # The construction of bases depends on the image data or the template
+            #  (depending on direction), whether or not there is a sky offset
+            #  and whether or not there is spatial variation.
+            it0 = time.time()
+            basis_sigma = None
+            if self.rev:
+               f0 = np.compress(wtflat,np.ravel(timage))
+               n0 = np.compress(wtflat,np.ravel(self.invnoise))
+               basisimage = data
+               if self.sigimage is not None:
+                  # make a variance map 
+                  basis_sigma = np.power(self.sigma, 2)
+            else:
+               f0 = np.compress(wtflat,np.ravel(data))
+               n0 = np.compress(wtflat,np.ravel(self.invnoise))
+               basisimage = timage
+               if self.master.sigimage is not None:
+                  basis_sigma = np.power(self.tsigma, 2)
+            step = ll/79 + 1  # for performance meter
+            cwt = np.compress(wtflat,wtflat)
+            # i,j indeces of masked image
+            coy,cox = np.compress(wtflat, 
+               [np.ravel(self.oy), np.ravel(self.ox)], 1).astype(np.int32)
+            flatimage = np.ravel(basisimage)
+            basis = []
+            for k in range(ll):
+               basis.append(cwt*np.take(flatimage,
+                     (coy+self.jj[k])*self.naxis1 + (cox+self.ii[k])))
+               if k % step == 0:
+                  sys.stdout.write(".")
+                  sys.stdout.flush()
+ 
+            if self.skyoff: basis = np.concatenate([basis,
+               [np.ones(f0.shape,np.float64)]])
+            basis = np.asarray(basis)
+            if self.spatial:
+                self.oxl = (self.ox-self.naxis1/2.0)/(self.naxis1/2.0)
+                woxl = np.compress(wtflat,np.ravel(self.oxl))
+                self.oyl = (self.oy-self.naxis2/2.0)/(self.naxis2/2.0)
+                woyl = np.compress(wtflat,np.ravel(self.oyl))
+                xbasis = [b*woxl for b in basis[:-1]]
+                ybasis = [b*woyl for b in basis[:-1]]
+                basis = np.concatenate([basis,xbasis,ybasis])
+            it1 = time.time()
+            self.log( "Bases constructed in %.4fs." % (it1-it0))
+            self.log( "Decomposition.")
+            it0 = time.time()
+            self.log( "Size of basis matrix:")
+            self.log(str(basis.shape))
+            du,dv,dw = singular_value_decomposition(np.transpose(basis))
+            it1 = time.time()
+            self.log( "Decomposition in %.4fs." % (it1-it0))
+            bases = []
+            for sol1a in dw:
+                psf2 = np.zeros((pful,pful),np.float64)
+                for k in range(ll):
+                    py = self.jj[k]+self.pwid
+                    px = self.ii[k]+self.pwid
+                    pr = np.sqrt(self.jj[k]**2 + self.ii[k]**2)
+                    psf2[py,px] = sol1a[k]
+                bases.append(psf2)
+            bases = np.asarray(bases)
+            npsx = int(np.sqrt(bases.shape[0]))+1
+            npsy = bases.shape[0]//npsx + 1
+            imbases = np.zeros((npsy*(bases.shape[1]+5), 
+                                npsx*(bases.shape[2]+5)), np.float64)
+            imb1 = 0
+            for j in range(npsy):
+              for i in range(npsx):
+                 y0 = j*(bases.shape[1]+5)
+                 y1 = y0 + bases.shape[1]
+                 x0 = i*(bases.shape[2]+5)
+                 x1 = x0 + bases.shape[2]
+                 imbases[y0:y1,x0:x1] = bases[imb1,::-1,::]
+                 imb1 += 1
+                 if imb1 == len(bases): break
+            imbases = imbases[::-1]
+            if self.verb > 1: qdump(self.imbases,imbases,self.image)
+            if self.verb > 1: self.log( dv)
+            sol1 = np.transpose(dw)
+            if self.mcut and self.mcut < len(dv):
+                self.log( "Ratio of first eigenvalue with last ten:")
+                rdv = dv[0]/dv
+                self.log( rdv[-10:])
+                if self.verb > 1:  qdump(self.rdv,rdv)
+                dv[self.mcut:] = 0 * dv[self.mcut:]
+                sol2 = divz(1,dv[:self.mcut])
+                sol3 = np.dot(np.transpose(du[::,:self.mcut]),cwt*f0)
+                self.psf1 = np.dot(sol1[::,:self.mcut], (sol2*sol3))
+                fitted = np.add.reduce(self.psf1[::,NA]*basis,0)
+                resid = fitted - f0
+                vc = dv[0]/dv[self.mcut-1]
+                umean = np.mean(resid)
+                urms = np.sqrt(np.mean(np.power(resid,2)))
+                uchi2 = np.sum(np.power(resid*n0,2))
+                uchi2u = uchi2 / (len(resid)-self.mcut)
+                self.log( "(CUT,MEAN,RMS,CHI2,RCHI2) = "
+                          "(%9.1f,%12.6f,%12.6f,%12.6f,%12.6f)"\
+                                % (vc,umean,urms,uchi2,uchi2u))
+            else:
+                self.log( "Ratio of first eigenvalue with last ten:")
+                rdv = 1.0/dv
+                self.log( str(rdv[-10:]))
+                if self.verb > 1: qdump(self.rdv,rdv)
+                cdv = np.zeros(rdv.shape,np.float64)
+                if self.vcut == 0: ucv = [0,1]
+                else: ucv = [1]
+                for cv in ucv:
+                   if cv:
+                       if self.vcut == 0:
+                          if self.verb > 1:  qdump("cdv.fits",rdv - cdv)
+                          tck = splrep(np.arange(len(dv)),rdv-cdv,k=1,s=0)
+                          vloc = sproot(tck,mest=len(dv))
+                          vloc = int(vloc[0])
+                          self.vcut = 10*rdv[vloc]
+                       rdv = [self.vcut]
+                       self.log( "Cutting at %1f." % (self.vcut))
+                   for jvc in range(len(rdv)):
+                       vc = rdv[jvc]
+                       udv = 1.0*np.greater_equal(dv,max(dv)/vc)
+                       jcut = int(np.sum(udv))
+                       if cv: self.log( "Using %d out of %d." % \
+                             (np.sum(udv),len(udv)))
+                       sol2 = divz(1,dv[:jcut])
+                       sol3 = np.dot(np.transpose(du[::,:jcut]),cwt*f0)
+                       self.psf1 = np.dot(sol1[::,:jcut], (sol2*sol3))
+                       fitted = np.add.reduce(self.psf1[::,NA]*basis,0)
+                       resid = fitted - f0
+                       umean = np.mean(resid)
+                       urms = np.sqrt(np.mean(np.power(resid,2)))
+                       uchi2 = np.sum(np.power(divz(resid,n0),2))
+                       uchi2u = uchi2 / (len(resid)-self.mcut)
+                       if not cv: cdv[jvc] = urms
+                       self.log( "(CUT,MEAN,RMS,CHI2,RCHI2) = "
+                                 "(%9.1f,%12.6f,%12.6f,%12.6f,%12.6f)" \
+                                       % (vc,umean,urms,uchi2,uchi2u))
+            del sol1,sol2,sol3,du,dv,dw,basis
+         if self.skyoff and self.pwid > 0: 
             self.log( "Sky= %f" % (self.psf1[ll]))
-         # Save the flux ratio for later if reversing.
-         self.fluxrat = np.sum(self.psf1[:ll])
-         self.log( "Flux ratio=%f" %(self.fluxrat))
+         fluxrat = np.sum(self.psf1[:ll])
+         self.log( "Flux ratio=%f"%fluxrat)
          if preserve:
+            # Save the flux ratio for later if reversing.
             self.log( "Preserving flux?")
+            self.fluxrat = fluxrat
             self.psf1[:ll] = self.psf1[:ll] / self.fluxrat
-            fluxrat = np.sum(self.psf1[:ll])
-            self.log( "Flux ratio=%f"%fluxrat)
+            self.log( "Flux ratio=%f"%self.fluxrat)
+         else:
+            self.fluxrat = 1.0
+
          if self.verb > 1:
            self.psf2 = np.zeros((pful,pful),np.float64)
            pxs = []
@@ -1263,11 +1402,11 @@ class Observation:
                 py = self.jj[k]+self.pwid
                 px = self.ii[k]+self.pwid
                 self.psf1[k] = self.psf2[py,px]
-         self.match = np.zeros(self.data.shape,np.float64)
-         self.grid = np.zeros(self.data.shape,np.float64)
+         self.match = np.zeros(data.shape,np.float64)
+         self.grid = np.zeros(data.shape,np.float64)
          if basis_sigma is not None:
             # the noise in the convolved image:
-            self.csigma = np.zeros(self.data.shape, np.float64)
+            self.csigma = np.zeros(data.shape, np.float64)
          dgridx, dgridy = int(self.naxis1/32), int(self.naxis2/32)
          gridin = np.logical_not(np.fmod(self.ox+dgridx,dgridx*2.0)) * \
                   np.logical_not(np.fmod(self.oy+dgridy,dgridy*2.0))
@@ -1342,28 +1481,23 @@ class Observation:
 
 
    def GoCatGo(self,master,verb=0,rev=0,xwin=None,ywin=None, skyoff=0,pwid=0,
-               perr=5.0,nmax=40,nord=0,spatial=0,mcut=0,vcut=1e-2,match=1,
+               perr=5.0,nmax=40,nord=0,spatial=0,mcut=0,vcut=1e8,match=1,
                subt=0, registered=0,preserve=0, min_sep=None,
                quick_convolve=0, do_sex=0, thresh=3., sexdir="./sex", 
-               sexcmd='sex',
+               sexcmd='sex', starmin=0, maxdist=-1,
                angles=[0.0], use_db=0, interactive=0, starlist=None, 
-               diff_size=None, bs=False, crowd=False, usewcs=False):
+               diff_size=None, bs=False, crowd=False, usewcs=False,
+               magcat=None, racol='RA', deccol='DEC', magcol='mag'):
       self.master = master
       self.skyoff=skyoff
       self.pwid=pwid
       if xwin and ywin:
          self.mask.add_mask(xwin[0], ywin[0], xwin[1], ywin[1], 
                sense='outside')
-         self.master.mask.add_mask(xwin[0], ywin[0], xwin[1], ywin[1], 
-               sense='outside')
       elif xwin:
          self.mask.add_mask(xwin[0], None, xwin[1], None, sense='outside')
-         self.master.mask.add_mask(xwin[0], None, xwin[1], None, 
-               sense='outside')
       elif ywin:
          self.mask.add_mask(None, ywin[0], None, ywin[1], sense='outside')
-         self.master.mask.add_mask(None, ywin[0], None, ywin[1], 
-               sense='outside')
       self.spatial=spatial
       self.rev=rev
       self.vcut=vcut
@@ -1373,6 +1507,8 @@ class Observation:
       self.do_sex=do_sex
       self.sexdir = sexdir
       self.sexcmd = sexcmd
+      self.starmin = starmin
+      self.maxdist = maxdist
       self.thresh = thresh
       self.master.do_sex=do_sex
       self.master.sexdir = sexdir
@@ -1380,9 +1516,7 @@ class Observation:
       self.master.thresh = thresh
       self.master.crowd = crowd
       self.imread(bs=bs, usewcs=usewcs)
-      #self.readcat()
       self.getSources()
-      #self.master.readcat()
       self.master.getSources()
       if self.snpos is not None:
          snx,sny = self.snpos.topixel()
@@ -1404,48 +1538,66 @@ class Observation:
             return -1
       self.mktemplate(registered, usewcs=False)
       self.mkweight()
-      qdump(self.rectemp,self.timage*(self.exptime/self.master.exptime)- \
-            self.bg,self.master.image)
-      if self.tsigma is not None:
+      if self.verb: qdump(self.weight, self.wt, self.image)
+
+      if self.verb: qdump(self.rectemp,(self.timage-self.tbg)*\
+            (self.exptime/self.master.exptime), extras=[('BACKGND',self.tbg)])
+      if self.tsigma is not None and self.verb:
          qdump(self.recsigma,self.tsigma*(self.exptime/self.master.exptime),
             self.master.image)
-      qdump(self.masked,np.greater(self.wt,0)*(self.data-self.bg),self.image)
+      if self.verb: 
+         qdump(self.masked,np.greater(self.wt,0)*(self.data),self.image,
+            extras=[('BACKGND',self.bg)])
 
       if match:
          self.mkmatch(preserve,quick_convolve=quick_convolve)
-         if self.rev:
-            qdump(self.template,(self.match-self.bg),self.image)
-         else:
-            qdump(self.template,(self.match-self.bg),self.master.image)
-         if self.pwid > -1: qdump(self.psfgrid,self.grid)
+         if self.verb:
+            if self.rev:
+               qdump(self.template,
+                     (self.timage-self.tbg)/self.fluxrat*\
+                     self.exptime/self.master.exptime + self.bg,self.image, 
+                     extras=[('BACKGND',self.bg)])
+            else:
+               qdump(self.template,(self.match + self.bg),self.image,
+                     extras=[('BACKGND',self.bg)])
+         if self.pwid > -1 and self.verb > 1: qdump(self.psfgrid,self.grid)
       if subt:
          ids = np.indices(self.match.shape)
          if self.rev: 
             if diff_size is not None and snx is not None and sny is not None:
                dists = np.sqrt(np.power(ids[1]-snx,2) + \
                        np.power(ids[0]-sny,2))
-               diff = self.match - \
+               diff = (self.match + self.bg) - \
                      np.where(np.less(dists,diff_size/self.scale),
-                              self.image/self.fluxrat, 0)
+                              (self.timage - self.tbg)*\
+                              self.exptime/self.master.exptime/self.fluxrat, 0)
+               fulldiff = ((self.match + self.bg) - \
+                     (self.timage - self.tbg)*\
+                     self.exptime/self.master.exptime/self.fluxrat)
             else:
-               diff = (self.match-self.timage/self.fluxrat)
-            qdump(self.difference,diff,self.image)
+               diff = ((self.match + self.bg) - \
+                     (self.timage-self.tbg)*\
+                     self.exptime/self.master.exptime/self.fluxrat)
+               fulldiff = diff
+            qdump(self.difference,diff,self.image, extras=[('BACKGND',self.bg)])
+            if self.verb: qdump(self.resids,np.greater(self.wt,0)*fulldiff,self.image)
             if snx is not None and sny is not None:
-               qdump(self.diffpostage, (self.match-self.timage/self.fluxrat)\
+               if self.verb: qdump(self.diffpostage, 
+                     (self.match-self.timage/self.fluxrat)\
                      [int(sny)-200:int(sny)+201,int(snx)-200:int(snx)+201],
                      self.image)
-               qdump(self.SNpostage, (self.match)\
+               if self.verb: qdump(self.SNpostage, (self.match)\
                      [int(sny)-200:int(sny)+201,int(snx)-200:int(snx)+201],
                      self.image)
-            qdump(self.SN, (self.match - self.bg), self.image)
-            if self.sigma is not None:
+            if self.verb: qdump(self.SN, (self.match + self.bg), self.image, 
+                  extras=[('BACKGND',self.bg)])
+            if self.sigma is not None and self.verb:
                qdump(self.SN.replace('.fits','_sigma.fits'), self.sigma, 
                      self.image)
-            qdump(self.template, (self.timage - self.bg), self.master.image)
             if self.sigimage is not None and self.master.sigimage is not None:
                # Make the noise map of the difference image
                var = np.power(self.csigma, 2) + np.power(self.master.sigma, 2)
-               qdump(self.difference.replace('.fits','_sigma.fits'), 
+               if self.verb: qdump(self.difference.replace('.fits','_sigma.fits'), 
                      np.sqrt(var), self.image)
          else: 
             if diff_size is not None and snx is not None and sny is not None:
@@ -1454,19 +1606,22 @@ class Observation:
                diff = self.data - \
                      np.where(np.less(dists,diff_size/self.scale),
                               self.match, 0)
+               fulldiff = (self.data - self.match)
             else:
                diff = (self.data-self.match)
-            qdump(self.difference,diff,self.image)
-            if snx is not None and sny is not None:
+               fulldiff = diff
+            qdump(self.difference,diff,self.image, extras=[('BACKGND',self.bg)])
+            if self.verb: qdump(self.resids,np.greater(self.wt,0)*fulldiff,self.image)
+            if snx is not None and sny is not None and self.verb:
                qdump(self.diffpostage, (self.data-self.match)\
                      [int(sny)-200:int(sny)+201,int(snx)-200:int(snx)+201],
                      self.image)
                qdump(self.SNpostage, (self.data)\
                      [int(sny)-200:int(sny)+201,int(snx)-200:int(snx)+201],
                      self.image)
-            qdump(self.SN,self.data,self.image)
-            qdump(self.template,(self.match-self.bg),self.master.image)
-            if self.sigimage is not None and self.master.sigimage is not None:
+            if self.verb: qdump(self.SN,self.data,self.image)
+            if self.sigimage is not None and self.master.sigimage is not None \
+                  and self.verb:
                # Make the noise map of the difference image
                var = np.power(self.csigma, 2) + np.power(self.sigma, 2)
                qdump(self.difference.replace('.fits','_sigma.fits'), 
@@ -1478,19 +1633,40 @@ class Observation:
 
    def plot_diff(self):
 
-      fig,axs = plt.subplots(1,3,figsize=(15,5))
+      fig,axs = plt.subplots(1,3,figsize=(15,5), 
+            dpi=rcParams['figure.dpi']*0.7)
       plt.subplots_adjust(wspace=0)
+      #if self.rev:
+      #   data = self.match + self.bg
+      #   temp = (self.timage - self.tbg)*self.exptime/self.master.exptime \
+      #         + self.bg
+      #   diff = (self.match + self.bg) - (self.timage - self.tbg)*\
+      #         self.exptime/self.master.exptime/self.fluxrat
+      #else:
+      #   data = self.data
+      #   temp = (self.match + self.bg)
+      #   diff = (self.data - self.match)
+      if self.rev:
+         data = self.match
+         temp = (self.timage - self.tbg)*self.exptime/self.master.exptime
+         diff = self.match - (self.timage - self.tbg)*\
+               self.exptime/self.master.exptime/self.fluxrat
+      else:
+         data = self.data - self.bg
+         temp = self.match
+         diff = self.data - self.bg - self.match
+
       if self.snpos is not None:
          snx,sny = self.snpos.topixel()
          snx = int(snx)
          sny = int(sny)
-         sno = self.data[sny-200:sny+200,snx-200:snx+200]
-         snt = (self.match-self.bg)[sny-200:sny+200,snx-200:snx+200]
-         snd = (self.data-self.match)[sny-200:sny+200,snx-200:snx+200]
+         sno = data[sny-200:sny+200,snx-200:snx+200]
+         snt = temp[sny-200:sny+200,snx-200:snx+200]
+         snd = diff[sny-200:sny+200,snx-200:snx+200]
       else:
-         sno = self.data
-         snt = self.match - self.bg
-         snd = self.data - self.match
+         sno = data
+         snt = temp
+         snd = diff
 
       norm = simple_norm(snd, percent=99)
       axs[0].imshow(sno, origin='lower', norm=norm, cmap='gray_r')
@@ -1505,6 +1681,6 @@ class Observation:
       axs[2].set_xlabel('Difference')
       fig.tight_layout()
 
-      fig.savefig(self.SN.replace('.fits', '_diff.png'))
+      fig.savefig(self.SN.replace('.fits', '_diff.jpg'))
 
 

@@ -1,0 +1,389 @@
+#!/usr/bin/env python
+
+import sys
+import imagematch
+from imagematch.rdarg import rdarg
+from imagematch.GaussianBG import GaussianBG
+from imagematch.ImageMatching_scalerot import *
+from imagematch.fitsutils import qdump, qload
+from astropy.io import fits
+from numpy import *
+import os,tarfile
+
+usage = '''
+ImageCombine [options] fits-files
+
+Rectifies and combines FITS images.
+
+Options:
+  [general behavior]
+    -m file:      Specify the FITS file to which others are aligned.  Default is
+                  last image specified.
+    -sex:         Don't run source-extractor.  *.cat files must already exist.
+    -sexdir dir   Location of source-extractor files.  Default is to get files
+                  from ${PYTHONDATA} and put them in the current folder.
+    -sexcmd cmd   Command-line name for source extractor (default sex)
+    -bs:          Background subtract images before processing
+    -fs:          Scale the images such that their flux matches before combining
+    -v:           Be verbose
+    -vv:          Be very verbose
+    -sky:         compute a sky offset as part of the solution.
+    -reg:         No alignment done:  images are already registered
+    -sig string   each [file].fits has a file[string].fits as std dev. image
+    -ar a1,a2,a3  In the case of not WCS info, have the code try several angular
+                  rotations from a1 to a2 in steps of a3.
+    -interactive  interactively match stars in the source and reference image.
+    -db           re-use the stored database of matches.
+    -method m     use method m to combine (average, median, sum, or cube)
+    -dr           Output the rectified images as well as the final stack
+                  (they will be named file_rect.fits)
+    -wcs          Use WCS info in the file's header if present.
+    -output file  Output the final image to file (def. combine.fits)
+  [image stats]
+    -pakey key    Use FITS header key as a rotation angle
+    -scale val    specify the image scale (arcsec/pixel)
+    -mscale val   specify the image scale of the reference image (if different)
+    -adu gain     specify the gain of the image
+    -rn rdnose    specify the readnoise
+    -max max      specify the max pixel value to use (e.g., saturation)
+    -max2 max2    specify the max pixel value to use for reference
+  [matching parameters]
+    -t threshold  The sigma threshold for image detection (def. 3)
+    -n nmax       Use only the nmax brightest objects (def. 50)
+    -ms min_sep   Only objects that have no neighbors closer than min_sep
+                  will be used.
+    -s perr       Maximum pixel error used for matching (def. 3)
+  [Coordinate transformation]
+    -o nord       Order of the transformation:
+                     nord = 0 --> translation, scale, rotation
+                     nord > 0 --> order nord polynomial transformation.
+    -clip         Clip the images to the common overlap region.
+                     
+    
+'''
+
+def median_mask(a, m, axis=0):
+   '''A median function that ignores true values for which  m  is True.  
+   This could be very slow if m is not sparse.  If any rows are 
+   completely masked out, then a NaN will be placed in that pixel value.'''
+   # first, we take the median:
+   med = median(a, axis=axis)
+   # Now look or places where we have masked bits
+   ii,jj = nonzero(sum(m, axis=axis))
+   for i,j in zip(ii,jj):
+      med[i,j] = median(a[:,i,j][~m[:,i,j]])
+   return med
+
+def make_noise(data, bg, gain=1, rdnoise=0.):
+   d = ravel(data) - bg
+   r = 1.49*median(absolute(d))
+   n2 = (data - bg)/gain
+   arg = n2 + r**2 + rdnoise**2
+   noise = where(greater(arg,0), sqrt(arg), -1)
+   return noise
+
+if '-h' in sys.argv or len(sys.argv) == 1:
+   print(usage)
+   sys.exit(1)
+
+argv = sys.argv
+print(argv)
+argv, sex = rdarg(argv,"-sex",None,1,single=1)
+argv, sexdir = rdarg(argv,"-sexdir",None,None)
+argv, sexcmd = rdarg(argv,"-sexcmd",None,'sex')
+argv, pakey = rdarg(argv,"-pakey",None,"rotang")
+argv, scale = rdarg(argv,"-scale",float,0.125)
+argv, mscale = rdarg(argv, "-mscale", float, scale)
+argv, gain = rdarg(argv, "-adu", float, 1.0)
+argv, rdnoise = rdarg(argv, "-rn", float, 0.0)
+argv, bs = rdarg(argv, '-bs', None, 0, single=True)
+argv, fs = rdarg(argv, '-fs', None, 0, single=True)
+argv, thresh = rdarg(argv,"-t",float,3.0)
+argv, nmax = rdarg(argv,"-n",int,50)
+argv, min_sep = rdarg(argv,"-ms",float,None)
+argv, nord = rdarg(argv,"-o",int,-1)
+argv, perr = rdarg(argv,"-s",float,3.0)
+argv, saturate = rdarg(argv,"-max",float,65e3)
+argv, saturate2 = rdarg(argv,"-max2",float,saturate)
+argv, verb = rdarg(argv,"-v",None,0,single=1)
+argv, verb2 = rdarg(argv,"-vv",None,0,single=1)
+argv, skyoff = rdarg(argv,"-sky",None,0,single=1)
+argv, master = rdarg(argv,"-m",None,None)
+argv, registered = rdarg(argv,"-reg",None,0,single=1)
+argv, sigsuf = rdarg(argv,"-sig",None,None)
+argv, extra_suf = rdarg(argv,"-extra",None,None)
+argv, wtype = rdarg(argv,"-wtype",None,'MAP_RMS')
+argv, ar = rdarg(argv, "-arange", None, None)
+argv, interactive = rdarg(argv, "-interactive", None, 0, single=1)
+argv, db = rdarg(argv, "-db", None,0, single=1)
+argv, method = rdarg(argv, "-method", None, "average")
+argv, cut = rdarg(argv, "-cut", float, None)    # sigma cutting for the average
+argv, keep = rdarg(argv, "-keep", int, 0)    # > 0:  keep at least this many pixels
+                                             # < 0:  throw away at most this many pixels
+argv, output = rdarg(argv, '-output', None, "combine.fits")
+argv, usewcs = rdarg(argv, "-wcs", None,0, single=1)
+argv, keep_rect = rdarg(argv, "-dr", None, 0, single=1)
+argv, clip = rdarg(argv, "-clip", None, 0, single=1)
+
+libdir = os.path.realpath(os.path.dirname(imagematch.__file__))
+
+if sexdir is None:
+   if not os.path.isdir('./sex'):
+      tar = tarfile.open(os.path.join(libdir,'data', 'sexdir.tar.gz'))
+      tar.extractall()
+   sexdir = os.path.join('.','sex')
+
+images = argv[1:]
+print(images)
+
+if ar:
+   li = ar.split(",")
+   if 1 < len(li) < 4:
+      li = map(float, li)
+      angles = arange(*li)
+   else:
+      print("Error:  -arange should have 2 or 3 angles, separated by commas")
+      sys.exit(1)
+else:
+   angles = [0.0]
+   
+if verb2:  verb = 2
+
+if extra_suf is not None:
+   extra_suf = extra_suf.split(',')
+
+Observations = [Observation(image,scale=scale,pakey=pakey,saturate=saturate,\
+               sigsuf=sigsuf, wtype=wtype, extra_sufs=extra_suf) \
+                for image in images]
+if master:
+   test = [observation for observation in Observations \
+           if observation.image == master]
+   if test: 
+      Master = test[0]
+      del Observations[Observations.index(Master)]
+   else: Master = Observation(master,scale=mscale,pakey=pakey,saturate=saturate2,
+                              sigsuf=sigsuf, wtype=wtype, extra_sufs=extra_suf)
+else: Master = Observations.pop()
+
+ref = Master
+print("Uinsg %s as reference" % (ref.image))
+ref.verb = verb
+ref.do_sex = sex
+ref.sexdir = sexdir
+ref.sexcmd = sexcmd
+ref.thresh = thresh
+ref.imread(bs=bs, usewcs=usewcs)
+if clip:
+   #f = fits.open(ref.image, memmap=False)[0].header
+   f = fits.getheader(ref.image, memmap=False)
+   if f['crpix1'] != 'N/A' and f['crpix2'] != 'N/A':
+      crpix = (f['crpix1'],f['crpix2'])
+   else:
+      crpix = None
+   if f['xsn'] != 'N/A' and f['ysn'] != 'N/A':
+      snpos = (f['xsn'],f['ysn'])
+   else:
+      snpos = None
+
+ref.readcat()
+
+stack = [ref.data]
+dx1 = 0  # there are the borders of the valid sumed image
+dx2 = 0
+dy1 = 0
+dy2 = 0
+bgs = [GaussianBG(ravel(ref.data).astype(float32),101)]
+if ref.sigma is not None:
+   sig_stack = [ref.sigma]
+   print("NaN in %s?" % (ref.image))
+else:
+   sig_stack = [make_noise(ref.data, bgs[-1], gain, rdnoise)]
+
+if ref.extras is not None:
+   extra_stack = [ref.extras]
+   extra_bgs = [[GaussianBG(ravel(xmap).astype(float32),101) for xmap in ref.extras]]
+else:
+   extra_stack = None
+   extra_bgs = None
+
+
+for o in Observations:
+   ref.pwid = -1
+   ref.xwin = None;  ref.ywin = None
+   ref.master = o
+   ref.master.verb = verb
+   ref.master.do_sex = sex
+   ref.master.sexdir = sexdir
+   ref.master.sexcmd = sexcmd
+   ref.master.thresh = thresh
+   ref.master.imread(bs=bs, usewcs=usewcs)
+   ref.master.readcat()
+   if not registered:
+      ref.compute(nmax=nmax, min_sep=min_sep)
+      ref.master.compute(nmax=nmax, min_sep=min_sep)
+      try:
+         ref.objmatch(nord=nord, perr=perr,angles=angles,interactive=interactive,
+            use_db=db)
+      except RuntimeError:
+         print("WARNING:  Failed to match enough objects for %s" % o.image)
+         del Observations[Observations.index(o)]
+         continue
+
+   ref.mktemplate(registered, usewcs=False)
+   if not registered and clip:
+      mean_dx = int(mean(ref.tx))
+      mean_dy = int(mean(ref.ty))
+      if mean_dx > 0:
+         dx1 = max([dx1, mean_dx])
+      else:
+         dx2 = max([dx2, -mean_dx])
+      if mean_dy > 0:
+         dy1 = max([dy1, mean_dy])
+      else:
+         dy2 = max([dy2, -mean_dy])
+
+   if fs:
+      ref.mkweight()
+      wtflat = ravel(ref.wt)
+      ref.timage = ref.timage * (ref.exptime/ref.master.exptime)
+      flux = sum(wtflat*ravel(ref.data))/sum(wtflat*ravel(ref.timage))
+      ref.log("Flux ratio = %.4f" % (flux))
+      ref.timage = ref.timage * flux
+      if ref.tsigma is not None:
+         ref.tsigma = ref.tsigma * flux
+
+   stack.append(ref.timage)
+   bgs.append(GaussianBG(ravel(ref.master.data).astype(float32), 101))
+   if ref.tsigma is not None:
+      sig_stack.append(ref.tsigma)
+      print("NaN in %s?:" % \
+            (ref.master.image), sometrue(isnan(ref.master.sigma)))
+      print("NaN in trans. %s?:" % \
+            (ref.master.image), sometrue(isnan(ref.tsigma)))
+   else:
+      sig_stack.append(make_noise(ref.timage, bgs[-1], gain, rdnoise))
+
+   if extra_stack is not None:
+      extra_stack.append(ref.textras)
+      extra_bgs.append([GaussianBG(ravel(xmap).astype(float32),101) \
+            for xmap in ref.master.extras])
+
+j1,j2,i1,i2 = (dx1,ref.data.shape[0]-dx2,dy1,ref.data.shape[1]-dy2)
+if clip:
+   print("clipping to [%d:%d,%d:%d]" % (i1,i2,j1,j2))
+stack = array(stack)
+bgs = array(bgs)
+stack_bg = stack-bgs[:,newaxis,newaxis]
+if extra_stack is not None:
+   extra_stack = array(extra_stack)
+   extra_bgs = array(extra_bgs)
+   extra_stack_bg = extra_stack - extra_bgs[:,:,newaxis,newaxis]
+
+
+extras = []
+if clip and crpix is not None:
+   extras.append(['crpix1',crpix[0]-i1])
+   extras.append(['crpix2',crpix[1]-j1])
+if clip and snpos is not None:
+   extras.append(['xsn', snpos[0]-i1])
+   extras.append(['ysn', snpos[1]-j1])
+
+
+
+if not registered and keep_rect:
+   # Dump out the rectified, bd-subtracted and scaled images
+   qdump(ref.image.replace('.fits','_rect.fits'), stack_bg[0][j1:j2,i1:i2], ref.image,
+         extras=extras)
+   if sig_stack is not None:
+      qdump(ref.image.replace('.fits','_rect_sigma.fits'), 
+            sig_stack[0][j1:j2,i1:i2], ref.image, extras=extras)
+   if extra_stack is not None:
+      for i,fil in enumerate(ref.extra_maps):
+         qdump(fil.replace('.fits','_rect.fits'), extra_stack[0,i,j1:j2,i1:i2],
+               ref.image, extras=extras)
+   for i in range(1,len(stack_bg)):
+      qdump(Observations[i-1].image.replace('.fits','_rect.fits'), 
+            stack_bg[i][j1:j2,i1:i2], ref.image, extras=extras)
+      if sig_stack is not None:
+         qdump(Observations[i-1].image.replace('.fits','_rect_sigma.fits'), 
+               sig_stack[i][j1:j2,i1:i2], Observations[i-1].image, extras=extras)
+      if extra_stack is not None:
+         for j,fil in enumerate(Observations[i-1].extra_maps):
+            qdump(fil.replace('.fits','_rect.fits'), extra_stack[i,j,j1:j2,i1:i2],
+                  ref.image, extras=extras)
+
+del Observations
+   
+print("deleted Observations")
+#print [st.shape for st in sig_stack]
+sig_stack = array(sig_stack)
+bpm_stack = less_equal(sig_stack, 0)
+wt_stack = power(sig_stack, -2)
+wt_stack = wt_stack*greater(sig_stack,0)
+
+print("Performing stats")
+
+med_stack = median_mask(stack_bg, bpm_stack, axis=0)  # the median
+bpm_med = isnan(med_stack)
+med_stack = where(bpm_med, 0, med_stack)
+if extra_stack is not None:
+   extra_med_stack = [median_mask(s, bpm_stack, axis=0) for s in extra_stack]
+   extra_med_stack = [where(isnan(s), 0, s) for s in extra_stack]
+noise_stack = sig_stack
+if method == 'average':
+   if cut is not None:
+      if sig_stack is None:
+         print("Warning:  can't sigma-cut with no noise images!")
+      # make a sigma-cut
+      devs = absolute(med_stack[newaxis,:,:]-stack_bg)
+      gids = less(devs,cut*noise_stack)
+      if keep != 0:
+         Nkeep = sum(gids, axis=0)
+         if keep < 0:  keep = gids.shape[0] + keep
+         too_many = less(Nkeep, keep)
+         ii,jj = nonzero(too_many)
+         for i,j in zip(ii,jj):
+            ks = argsort(devs[:,i,j])[0:keep]
+            gids[:,i,j][ks] = True
+      wt_stack = wt_stack*gids*-bpm_stack
+   wtsum = sum(wt_stack,axis=0)
+   combo = sum(wt_stack*stack, axis=0)/wtsum
+   combo = where(equal(wtsum, 0), 0, combo)
+   sig_combo = sqrt(1.0/wtsum)
+   sig_combo = where(equal(wtsum,0), -1, sig_combo)
+   if extra_stack is not None:
+      extra_combo = sum(wt_stack[:,newaxis,:,:]*extra_stack,axis=0)/wtsum[newaxis,:,:]
+elif method == 'median':
+   combo = med_stack
+   if extra_stack is not None:
+      extra_combo = extra_med_stack
+   sig_combo = sqrt(1.0/sum(wt_stack, axis=0))
+   sig_combo = where(equal(sum(wt_stack, axis=0),0), -1, sig_combo)
+elif method == 'sum':
+   combo = sum(stack, axis=0)
+   if extra_stack is not None:
+      extra_combo = [sum(s, axis=0) for s in extra_stack]
+   sig_combo = sqrt(sum(power(sig_stack,2), axis=0))
+elif method == 'cube':
+   combo = stack
+   if extra_stack is not None:
+      extra_combo = extra_stack
+   sig_combo = None
+else:
+   print("Error, unkonwn combination operator",method)
+   sys.exit(1)
+
+print("Dumping images")
+
+extras = extras + [['IMCOMBINE%d'%i,images[i]] for i in range(len(images))]
+extras.append(['NCOMBINE',len(images)])
+qdump(output, combo[j1:j2,i1:i2], ref.image, extras=extras)
+if sig_combo is not None:
+   qdump(output.replace('.fits','_sigma.fits'), sig_combo[j1:j2,i1:i2], 
+         ref.image, extras=extras)
+
+if extra_stack is not None:
+   for i in range(len(extra_suf)):
+      qdump(output.replace('.fits',extra_suf[i]+".fits"), extra_combo[i,j1:j2,i1:i2],
+            ref.image, extras=extras)
+

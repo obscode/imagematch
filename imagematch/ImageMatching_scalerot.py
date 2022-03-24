@@ -261,12 +261,13 @@ class Observation:
    def __init__(self,image,wt=None,scale='scale',pakey="rotangle",
          saturate=30000, skylev=None, sigsuf=None, wtype="MAP_RMS", 
          mask_file=None, reject=0, snx=None, sny=None, snmaskr=10.0, 
-         extra_sufs=[], hdu=0, magmin=None, magmax=None):
+         extra_sufs=[], hdu=0, magmin=None, magmax=None, store_bg=True):
 
       self.image = image   # The image name
       self.hdu = hdu
       self.magmin = magmin
       self.magmax = magmax
+      self.store_bg = store_bg
 
       # Keep a logfile
       #self.log_stream = open(self.image.replace('.fits','')+'.log', 'w')
@@ -708,7 +709,10 @@ class Observation:
       elif "MAG_AUTO" in self.master.sexdata: 
          allm1 = np.array(self.master.sexdata["MAG_AUTO"])
       allq1 = np.array(self.master.sexdata["FLAGS"])
-         
+
+      np.savetxt('pass0_matches.np',[x0,y0,x1,y1])
+      np.savetxt('allx0s.np', [allx0,ally0])
+      np.savetxt('allx1s.np', [allx1,ally1])
       # now we iterate on the solution and throw out bad points
       for iter in range(Niter):
          if iter:
@@ -729,6 +733,7 @@ class Observation:
             ui0 = [];  ui1 = []
             for j in range(delx.shape[0]):
                if min(dels[j]) < perr and j not in bobjs0:
+               #if min(dels[j]) < tol and j not in bobjs0:
                   idx = np.argmin(dels[j])
                   if idx not in bobjs1:
                      ui0.append(j)
@@ -742,11 +747,11 @@ class Observation:
                self.log("Error:  Residuals of coordinate tranformation are all"
                         "greater")
                self.log("than one pixel.  Try with smaller order.")
-               if self.verb > 1:
-                  fig.save('match.pdf')
                return -1
             x0,y0,m0 = np.take([allx0,ally0,allm0],ui0,1)
             x1,y1,m1 = np.take([allx1,ally1,allm1],ui1,1)
+            np.savetxt('pass{}_matches.np'.format(iter),[x0,y0,x1,y1])
+
             f0 = np.power(10,-0.4*(m0-min(m0)))
             f1 = np.power(10,-0.4*(m1-min(m1)))
             # not sure about the point here...
@@ -831,6 +836,11 @@ class Observation:
                self.zp = None
          else:
             self.zp = None
+
+         # Check for previously determind BG and SD
+         if self.store_bg and 'IMMATBG' in h:
+            self._bg = h['IMMATBG']
+            self._r = h['IMMATSD']
 
          # Check for NaNs
          self.nans = np.isnan(self.data)
@@ -980,6 +990,7 @@ class Observation:
    def estimate_bg(self, Niter=5):
       '''Estimate the background level.'''
       if getattr(self, '_bg', None) is not None:
+         self.log("Using stored: BG=%.3f with sigma=%.3f" % (self._bg,self._r))
          return self._bg,self._r
       for uk in range(Niter):
          if uk:
@@ -996,6 +1007,12 @@ class Observation:
          if self.verb > 0:
             self.log(" BG iter %d: BG=%.3f, sigma=%.3f" % (uk,bg, r))
       self.log("Using %d: BG=%.3f with sigma=%.3f" % (len(udata),bg,r))
+
+      # Save values into header, since they are expensive to compute
+      if self.store_bg:
+         FITS.setval(self.image, 'IMMATBG', value=bg)
+         FITS.setval(self.image, 'IMMATSD', value=r)
+
       # Save for multiple calls (good for templates!)
       self._bg = bg
       self._r = r

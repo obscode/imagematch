@@ -33,6 +33,7 @@ imask =
 mmask = 
 snx = 
 sny = 
+store_bg = True
 
 [tasks]
 bs = True
@@ -127,6 +128,7 @@ argv, spatial = rdarg(argv,"-spatial",None,cfg.match.spatial,single=1)
 argv, verb = rdarg(argv,"-v",None,0,single=1)
 argv, verb2 = rdarg(argv,"-vv",None,0,single=1)
 argv, subt = rdarg(argv,"-sub",None,cfg.tasks.subt,single=1)
+argv, store_bg = rdarg(argv, "-storebg", None, cfg.data.store_bg, single=1)
 argv, skyoff = rdarg(argv,"-sky",None,cfg.match.skyoff,single=1)
 argv, rev = rdarg(argv,"-R",None,cfg.match.rev,single=1)
 argv, master = rdarg(argv,"-m",None,cfg.data.master)
@@ -202,7 +204,7 @@ if verb2:  verb = 2
 Observations = [Observation(image,scale=scale,pakey=pakey,saturate=saturate,\
                skylev=skylev, sigsuf=sigsuf, wtype=wtype, mask_file=imask_file, 
                reject=reject, snx=snx, sny=sny, snmaskr=snmaskr, hdu=hdu,
-               magmax=magmax, magmin=magmin) \
+               magmax=magmax, magmin=magmin, store_bg=store_bg) \
                 for image in images]
 
 Epochs = [observation.epoch for observation in Observations]
@@ -217,7 +219,7 @@ if master:
                               saturate=saturate2,
                               skylev=skylev2, sigsuf=sigsuf, wtype=wtype, 
                               mask_file=mmask_file, reject=reject, hdu=hdu,
-                              magmax=magmax2, magmin=magmin2)
+                              magmax=magmax2, magmin=magmin2, store_bg=store_bg)
 else: 
    Master = Observations[-1]
    Master.mask_file = mmask_file

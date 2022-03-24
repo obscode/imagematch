@@ -23,7 +23,8 @@ from .VTKHelperFunctions import *  # all start with VTK, so this is okay :)
 from .ReadSex import readsex
 from photutils import detect_threshold,detect_sources,Background2D
 from photutils import MedianBackground, detect_threshold
-from photutils import source_properties
+#from photutils import source_properties
+from photutils.segmentation import SourceCatalog
 from photutils.utils import calc_total_error
 from astropy.convolution import Gaussian2DKernel
 from astropy.io import fits as FITS
@@ -266,7 +267,7 @@ class Observation:
    def __init__(self,image,wt=None,scale='scale',pakey="rotangle",
          saturate=30000, skylev=None, sigsuf=None, wtype="MAP_RMS", 
          mask_file=None, reject=0, snx=None, sny=None, snmaskr=10.0, 
-         extra_sufs=[], hdu=0, minarea-10, magmin=None, magmax=None, 
+         extra_sufs=[], hdu=0, minarea=10, magmin=None, magmax=None, 
          store_bg=True):
 
       self.image = image   # The image name
@@ -417,18 +418,18 @@ class Observation:
 
       thresh = bg + 2*rms
       seg = detect_sources(self.data, thresh, npixels=self.minarea,
-            filter_kernel=k)
+            kernel=k)
       self.seg = seg.data
       # Save the segmentation map
       qdump(self.segmap, self.seg, self.image)
 
       # get the source locations and photometry
       error = calc_total_error(self.data, rms, 1.0)
-      tab = source_properties(self.data, seg, error=error).to_table()
+      tab = SourceCatalog(self.data, seg, error=error).to_table()
       tab.rename_column('xcentroid','X_IMAGE')
       tab.rename_column('ycentroid','Y_IMAGE')
-      tab['MAG_BEST'] = -2.5*np.log10(tab['source_sum']) + 30
-      tab['MAGERR_BEST'] = 1.087*tab['source_sum_err']/tab['source_sum']
+      tab['MAG_BEST'] = -2.5*np.log10(tab['segment_flux']) + 30
+      tab['MAGERR_BEST'] = 1.087*tab['segment_fluxerr']/tab['segment_flux']
       tab['FLAGS'] = 0  # for now, need to figure out bad objects
       self.sexdata = tab
 
@@ -441,63 +442,6 @@ class Observation:
             overwrite=True)
 
       
-   def sex(self):
-      '''This function runs sextractor on the image, finding images to be used
-      for rectification and solving for the kernel.'''
-
-      if self.sexdir[-1] != "/": self.sexdir += "/"
-      self.sexcom = [self.sexcmd,self.image]
-      self.sexcom += ["-c "+self.sexdir+"default.sex"]
-      self.sexcom += ["-PARAMETERS_NAME "+self.sexdir+"default.param"]
-      if self.sigimage: self.sexcom += ["-WEIGHT_IMAGE "+self.sigimage]
-      if self.sigimage: self.sexcom += ["-WEIGHT_TYPE %s" % self.wtype]
-      self.sexcom += ["-DETECT_MINAREA 5"]
-      self.sexcom += ["-DETECT_THRESH "+str(self.thresh)]
-      self.sexcom += ["-ANALYSIS_THRESH "+str(self.thresh)]
-      self.sexcom += ["-PIXEL_SCALE "+str(self.scale)]
-      self.sexcom += ["-SEEING_FWHM "+str(0.8/self.scale)]
-      self.sexcom += ["-CATALOG_NAME",self.catalog]
-      self.sexcom += ["-CHECKIMAGE_TYPE SEGMENTATION"]
-      self.sexcom += ["-CHECKIMAGE_NAME "+self.segmap]
-      self.sexcom += ["-FILTER_NAME "+self.sexdir+"gauss_3.0_5x5.conv"]
-      self.sexcom += ["-STARNNW_NAME "+self.sexdir+"default.nnw"]
-      self.sexcom += ["-SATUR_LEVEL "+str(self.saturate)]
-      self.sexcom += ["-DEBLEND_MINCONT 1"]
-      self.sexcom += ["-VERBOSE_TYPE QUIET"]
-      if self.zp is not None:
-         self.sexcom += ["-MAG_ZEROPOINT " + str(self.zp)]
-      self.sexcom = ' '.join(self.sexcom)
-      if self.verb:
-         self.log("Running {}".format(self.sexcom))
-      os.system(self.sexcom)
-
-   def readcat(self, magcat=None, racol='RA', deccol='DEC', magcol='rmag'):
-      '''Read the SExtractor output.'''
-      if self.do_sex:  self.sex()
-      self.sexdata = readsex(self.catalog)[0]
-      self.sexdata['CLASS_STAR'] = np.array(self.sexdata['CLASS_STAR'])
-      self.sexdata['NUMBER'] = np.array(self.sexdata['NUMBER'])
-      #f = FITS.open(self.segmap, memmap=False)
-      #self.seg = f[self.hdu].data
-      h,self.seg = qload(self.segmap, self.hdu)
-      #f.close()
-      # read magnitude data
-      if magcat is not None:
-         if self.wcs is None:
-            raise AttributeError("To use magcat, you need a WCS in the image")
-         magtab = ascii.read(magcat, fill_values=[('...',0)])
-         ii,jj = self.wcs.wcs_world2pix(magtab[racol], magtab[deccol], 0)
-         self.segmags = np.zeros((self.seg.max()+1,))-999
-         for i in range(len(ii)):
-            if not 0 < jj[i] < self.data.shape[0] or \
-               not 0 < ii[i] < self.data.shape[1]:
-               continue
-            obj_id = self.seg[int(jj[i]),int(ii[i])]
-            if obj_id > 0:
-               self.segmags[obj_id] = magtab[i][magcol]
-      else:
-         self.segmags = self.sexdata['MAG_APER']
-
    def getSources(self):
       '''Read in the previously determined source catalog and segmentation 
       map'''
@@ -591,7 +535,6 @@ class Observation:
       self.log("Matching "+self.master.image+" to "+self.image)
       if "sexdata" not in dir(self.master):
          self.master.master = self.master
-         #self.master.readcat()
          self.master.getSources()
          self.master.compute(nmax=self.nmax, min_sep=self.min_sep)
 
@@ -753,23 +696,23 @@ class Observation:
 
       allx0 = np.array(self.sexdata["X_IMAGE"])
       ally0 = np.array(self.sexdata["Y_IMAGE"])
-      star0 = np.array(self.sexdata["CLASS_STAR"])
-      if "MAG_BEST" in self.sexdata: 
+      if "MAG_BEST" in self.sexdata.colnames: 
          allm0 = np.array(self.sexdata["MAG_BEST"])
-      elif "MAG_AUTO" in self.sexdata: 
+      elif "MAG_AUTO" in self.sexdata.colnames: 
          allm0 = np.array(self.sexdata["MAG_AUTO"])
+      else:
+         allm0 = np.zeros(len(self.sexdata))
       allq0 = np.array(self.sexdata["FLAGS"])
       allx1 = np.array(self.master.sexdata["X_IMAGE"])
       ally1 = np.array(self.master.sexdata["Y_IMAGE"])
-      if "MAG_BEST" in self.master.sexdata:
+      if "MAG_BEST" in self.master.sexdata.colnames:
          allm1 = np.array(self.master.sexdata["MAG_BEST"])
-      elif "MAG_AUTO" in self.master.sexdata: 
+      elif "MAG_AUTO" in self.master.sexdata.colnames: 
          allm1 = np.array(self.master.sexdata["MAG_AUTO"])
+      else:
+         allm1 = np.zeros(len(self.master.sexdata))
       allq1 = np.array(self.master.sexdata["FLAGS"])
 
-      np.savetxt('pass0_matches.np',[x0,y0,x1,y1])
-      np.savetxt('allx0s.np', [allx0,ally0])
-      np.savetxt('allx1s.np', [allx1,ally1])
       # now we iterate on the solution and throw out bad points
       for iter in range(Niter):
          if iter:
@@ -784,8 +727,6 @@ class Observation:
             dely = iy[::,NA] - ally1[NA,::]
             dels = np.sqrt(np.power(delx,2) + np.power(dely,2))
             delq = np.less_equal(allq0,4)[::,NA]*np.less_equal(allq1,4)[NA,::]
-            if getattr(self,'starmin', -1) > 0:
-               delq = delq * np.less_equal(star0,self.starmin)[::,NA]
             dels = np.where(delq,dels,9999)
             ui0 = [];  ui1 = []
             for j in range(delx.shape[0]):
@@ -807,7 +748,6 @@ class Observation:
                return -1
             x0,y0,m0 = np.take([allx0,ally0,allm0],ui0,1)
             x1,y1,m1 = np.take([allx1,ally1,allm1],ui1,1)
-            np.savetxt('pass{}_matches.np'.format(iter),[x0,y0,x1,y1])
 
             f0 = np.power(10,-0.4*(m0-min(m0)))
             f1 = np.power(10,-0.4*(m1-min(m1)))
@@ -1078,11 +1018,6 @@ class Observation:
             if self.magmin: gids = gids*np.greater(self.segmags, self.magmin)
             gids[0] = False   # zero is no object
             sat_objects = np.concatenate([sat_objects, np.nonzero(~gids)[0]])
-
-         # Retain only stellar objects
-         if getattr(self,'starmin', -1) > 0:
-            sat_objects = np.concatenate([sat_objects, self.sexdata['NUMBER'][\
-                  self.sexdata['CLASS_STAR'] < self.starmin]])
 
          # Now a bit of trickery to find non-repeating set of object numbers:
          objects = list(set(sat_objects))
@@ -1484,7 +1419,7 @@ class Observation:
                perr=5.0,nmax=40,nord=0,spatial=0,mcut=0,vcut=1e8,match=1,
                subt=0, registered=0,preserve=0, min_sep=None,
                quick_convolve=0, do_sex=0, thresh=3., sexdir="./sex", 
-               sexcmd='sex', starmin=0, maxdist=-1,
+               sexcmd='sex', maxdist=-1,
                angles=[0.0], use_db=0, interactive=0, starlist=None, 
                diff_size=None, bs=False, crowd=False, usewcs=False,
                magcat=None, racol='RA', deccol='DEC', magcol='mag'):
@@ -1507,7 +1442,6 @@ class Observation:
       self.do_sex=do_sex
       self.sexdir = sexdir
       self.sexcmd = sexcmd
-      self.starmin = starmin
       self.maxdist = maxdist
       self.thresh = thresh
       self.master.do_sex=do_sex

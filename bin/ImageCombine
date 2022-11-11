@@ -176,11 +176,13 @@ ref.imread(bs=bs, usewcs=usewcs)
 if clip:
    #f = fits.open(ref.image, memmap=False)[0].header
    f = fits.getheader(ref.image, memmap=False)
-   if f['crpix1'] != 'N/A' and f['crpix2'] != 'N/A':
+   #if f['crpix1'] != 'N/A' and f['crpix2'] != 'N/A':
+   if 'crpix1' in f and 'crpix2' in f:
       crpix = (f['crpix1'],f['crpix2'])
    else:
       crpix = None
-   if f['xsn'] != 'N/A' and f['ysn'] != 'N/A':
+   #if f['xsn'] != 'N/A' and f['ysn'] != 'N/A':
+   if 'xsn' in f and 'ysn' in f:
       snpos = (f['xsn'],f['ysn'])
    else:
       snpos = None
@@ -375,7 +377,7 @@ else:
 
 print("Dumping images")
 
-extras = extras + [['IMCOMBINE%d'%i,images[i]] for i in range(len(images))]
+extras = extras + [['IMCOMB%d'%i,images[i]] for i in range(len(images))]
 extras.append(['NCOMBINE',len(images)])
 qdump(output, combo[j1:j2,i1:i2], ref.image, extras=extras)
 if sig_combo is not None:

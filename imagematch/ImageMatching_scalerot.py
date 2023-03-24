@@ -278,7 +278,16 @@ class Observation:
       self.catalog = base.replace(".fits",".cat")  # Output catalog of objects
       # Error maps
       if sigsuf: 
-         self.sigimage = self.image.replace(".fits",sigsuf+".fits")
+         if sigsuf[0] == "@":
+            # FITS extension, so use that, but sextractor needs a file.
+            self.sigimage = self.image.replace('.fits','_sigma.fits')
+            try:
+               sigheader,sigdata = qload(self.image, hdu=sigsuf[1:])
+               qdump(self.sigimage, sigdata, self.image)
+            except:
+               self.sigimage = None
+         else:
+            self.sigimage = self.image.replace(".fits",sigsuf+".fits")
       else: 
          self.sigimage = None
       # Any extra stuff
@@ -710,9 +719,9 @@ class Observation:
          allm1 = np.array(self.master.sexdata["MAG_AUTO"])
       allq1 = np.array(self.master.sexdata["FLAGS"])
 
-      np.savetxt('pass0_matches.np',[x0,y0,x1,y1])
-      np.savetxt('allx0s.np', [allx0,ally0])
-      np.savetxt('allx1s.np', [allx1,ally1])
+      #np.savetxt('pass0_matches.np',[x0,y0,x1,y1])
+      #np.savetxt('allx0s.np', [allx0,ally0])
+      #np.savetxt('allx1s.np', [allx1,ally1])
       # now we iterate on the solution and throw out bad points
       for iter in range(Niter):
          if iter:
@@ -750,7 +759,7 @@ class Observation:
                return -1
             x0,y0,m0 = np.take([allx0,ally0,allm0],ui0,1)
             x1,y1,m1 = np.take([allx1,ally1,allm1],ui1,1)
-            np.savetxt('pass{}_matches.np'.format(iter),[x0,y0,x1,y1])
+            #np.savetxt('pass{}_matches.np'.format(iter),[x0,y0,x1,y1])
 
             f0 = np.power(10,-0.4*(m0-min(m0)))
             f1 = np.power(10,-0.4*(m1-min(m1)))
@@ -1076,7 +1085,7 @@ class Observation:
       # note by using np.less(zids, 0.02), we're effectively doing a fuzzy 
       #  'not'
       wt = VTKMultiply(seg, VTKMultiply(mseg, np.less(zids, 0.02)))
-      print(np.sum(np.greater(wt, 0)))
+      #print(np.sum(np.greater(wt, 0)))
 
       # throw out data that have very low values
       lowids = np.less(self.data, self.bg-5*r).astype(np.float32)
@@ -1117,11 +1126,17 @@ class Observation:
       swt = VTKGauss(swt,gwid,numret=1)
       wt = VTKMultiply(wt, VTKLessEqual(swt,0.02))
       if self.sigimage:
-         self.noise = self.sigma
+         self.noise = self.sigma.astype(np.float64)
       else:
          n2 = VTKSubtract(self.data,self.bg)
          self.noise = VTKSqrt(VTKAdd(n2,pow(r,2)))
       self.invnoise = VTKInvert(self.noise)
+      if self.master.sigimage:
+         self.master.noise = self.master.sigma
+      else:
+         n2 = VTKSubtract(self.master.data, self.tbg)
+         self.master.noise = VTKSqrt(VTKAdd(n2, pow(r2,2)))
+      self.tinvnoise = VTKInvert(self.master.noise)
       wt = VTKMultiply(wt, self.invnoise)
 
       # Get rid of little "islands" of data that can't constrain the kernel
@@ -1161,11 +1176,20 @@ class Observation:
             self.log( "Flux ratio = %.4f" % (flux))
             self.match = flux*timage
             resid = np.compress(wtflat, np.ravel(data)) -\
-                    np.compress(wtflat, np.ravel(timage))
+                    np.compress(wtflat, np.ravel(flux*timage))
             if self.sigimage is not None and self.master.sigimage is not None:
                self.csigma = np.sqrt(np.power(self.sigma,2) + \
                      np.power(self.tsigma, 2))
             self.fluxrat = 1.0
+            self.dof = 1
+            umean = np.mean(resid)
+            urms = np.sqrt(np.mean(np.power(resid,2)))
+            uchi2 = np.sum(np.power(resid*np.compress(wtflat,wtflat),2))
+            uchi2u = uchi2 / (len(resid)-self.dof)
+            self.log( "(CUT,MEAN,RMS,CHI2,RCHI2) = "
+                      "(%9.1f,%12.6f,%12.6f,%12.6f,%12.6f)"\
+                            % (0,umean,urms,uchi2,uchi2u))
+
             return
          else:
             # Full width of the kernel, make it odd
@@ -1230,6 +1254,7 @@ class Observation:
             it0 = time.time()
             self.log( "Size of basis matrix:")
             self.log(str(basis.shape))
+            self.dof = basis.shape[0]
             du,dv,dw = singular_value_decomposition(np.transpose(basis))
             it1 = time.time()
             self.log( "Decomposition in %.4fs." % (it1-it0))
@@ -1266,6 +1291,7 @@ class Observation:
                 rdv = dv[0]/dv
                 self.log( rdv[-10:])
                 if self.verb > 1:  qdump(self.rdv,rdv)
+                self.rdv0 = rdv*1  # save a copy
                 dv[self.mcut:] = 0 * dv[self.mcut:]
                 sol2 = divz(1,dv[:self.mcut])
                 sol3 = np.dot(np.transpose(du[::,:self.mcut]),cwt*f0)
@@ -1275,14 +1301,15 @@ class Observation:
                 vc = dv[0]/dv[self.mcut-1]
                 umean = np.mean(resid)
                 urms = np.sqrt(np.mean(np.power(resid,2)))
-                uchi2 = np.sum(np.power(resid*n0,2))
-                uchi2u = uchi2 / (len(resid)-self.mcut)
+                uchi2 = np.sum(np.power(resid*np.compress(wtflat,wtflat),2))
+                uchi2u = uchi2 / (len(resid)-self.dof)
                 self.log( "(CUT,MEAN,RMS,CHI2,RCHI2) = "
                           "(%9.1f,%12.6f,%12.6f,%12.6f,%12.6f)"\
                                 % (vc,umean,urms,uchi2,uchi2u))
             else:
                 self.log( "Ratio of first eigenvalue with last ten:")
-                rdv = 1.0/dv
+                rdv = dv[0]/dv
+                self.rdv0 = rdv*1   # save a copy
                 self.log( str(rdv[-10:]))
                 if self.verb > 1: qdump(self.rdv,rdv)
                 cdv = np.zeros(rdv.shape,np.float64)
@@ -1306,13 +1333,17 @@ class Observation:
                              (np.sum(udv),len(udv)))
                        sol2 = divz(1,dv[:jcut])
                        sol3 = np.dot(np.transpose(du[::,:jcut]),cwt*f0)
+                       #np.savetxt('sol1.dat',sol1)
+                       #np.savetxt('sol2.dat',sol2)
+                       #np.savetxt('sol3.dat',sol3)
+
                        self.psf1 = np.dot(sol1[::,:jcut], (sol2*sol3))
                        fitted = np.add.reduce(self.psf1[::,NA]*basis,0)
                        resid = fitted - f0
                        umean = np.mean(resid)
                        urms = np.sqrt(np.mean(np.power(resid,2)))
-                       uchi2 = np.sum(np.power(divz(resid,n0),2))
-                       uchi2u = uchi2 / (len(resid)-self.mcut)
+                       uchi2 = np.sum(np.power(resid*np.compress(wtflat,wtflat),2))
+                       uchi2u = uchi2 / (len(resid)-self.dof)
                        if not cv: cdv[jvc] = urms
                        self.log( "(CUT,MEAN,RMS,CHI2,RCHI2) = "
                                  "(%9.1f,%12.6f,%12.6f,%12.6f,%12.6f)" \
@@ -1439,11 +1470,11 @@ class Observation:
       else: return p*QuickShift(matching,i,j)
 
 
-   def GoCatGo(self,master,verb=0,rev=0,xwin=None,ywin=None, skyoff=0,pwid=0,
-               perr=5.0,nmax=40,nord=0,spatial=0,mcut=0,vcut=1e8,match=1,
-               subt=0, registered=0,preserve=0, min_sep=None,
-               quick_convolve=0, do_sex=0, thresh=3., sexdir="./sex", 
-               sexcmd='sex', starmin=0, maxdist=-1,
+   def GoCatGo(self,master,verb=0,rev=0,xwin=None,ywin=None, 
+               skyoff=0,pwid=0, perr=5.0,nmax=40,nord=0,spatial=0,mcut=0,
+               vcut=1e8,match=1, subt=0, registered=0,preserve=0, 
+               min_sep=None, quick_convolve=0, do_sex=0, thresh=3., 
+               sexdir="./sex", sexcmd='sex', starmin=0, maxdist=-1,
                angles=[0.0], use_db=0, interactive=0, starlist=None, 
                diff_size=None, bs=False, crowd=False, usewcs=False,
                magcat=None, racol='RA', deccol='DEC', magcol='mag'):
@@ -1509,7 +1540,40 @@ class Observation:
             extras=[('BACKGND',self.bg)])
 
       if match:
-         self.mkmatch(preserve,quick_convolve=quick_convolve)
+         if self.rev == 'auto':
+            # Do both forward and reverse and figure out which kernel
+            # is more well-behaved (not de-convolving)
+            self.rev = False
+            self.mkmatch(preserve,quick_convolve=quick_convolve)
+            rdv1 = self.rdv0
+            forwardmatch = self.match
+            self.rev = True
+            self.mkmatch(preserve, quick_convolve=quick_convolve)
+            rdv2 = self.rdv0
+
+            # Condistion we're testing:  rdvs are larger for deconvolve
+            idx = len(rdv1)//2
+            print("AUTO:",np.sum(rdv1[:idx]<rdv2[:idx]), 
+                          np.sum(rdv1[:idx]<rdv2[idx])/idx)
+            if np.sum(rdv1[:idx] < rdv2[:idx])/len(rdv1[:idx]) > 0.5:
+               # Switch back to forward
+               self.log("AUTO:  Using forward matching")
+               self.rev = False
+               self.match = forwardmatch
+            else:
+               self.log("AUTO:  Using reverse matching")
+
+         else:
+            self.mkmatch(preserve,quick_convolve=quick_convolve)
+            # Some stats. First, significant negative pixels in the kernel
+            if self.pwid > -1:
+               ll = len(self.ii)
+               kbg = np.median(self.psf1[:ll])
+               ksd = 1.49*np.median(np.absolute(self.psf1[:ll]-kbg))
+               nneg = np.sum(np.less(self.psf1[:ll],kbg-3*ksd))
+               self.log("Number of significant negative kernel "\
+                         "pixels = {}({}%)".format(nneg, nneg/ll*100))
+
          if self.verb:
             if self.rev:
                qdump(self.template,
@@ -1565,10 +1629,16 @@ class Observation:
                diff = self.data - \
                      np.where(np.less(dists,diff_size/self.scale),
                               self.match, 0)
+               if self.sigimage is not None and self.master.sigimage is not None:
+                  var = np.power(self.sigma, 2) + \
+                        np.power(np.where(np.less(dists,diff_size/self.scale),
+                                 self.csigma, 0),2)
                fulldiff = (self.data - self.match)
             else:
                diff = (self.data-self.match)
                fulldiff = diff
+               if self.sigimage is not None and self.master.sigimage is not None:
+                  var = np.power(self.csigma, 2) + np.power(self.sigma, 2) 
             qdump(self.difference,diff,self.image, extras=[('BACKGND',self.bg)])
             if self.verb: qdump(self.resids,np.greater(self.wt,0)*fulldiff,self.image)
             if snx is not None and sny is not None and self.verb:
@@ -1579,10 +1649,8 @@ class Observation:
                      [int(sny)-200:int(sny)+201,int(snx)-200:int(snx)+201],
                      self.image)
             if self.verb: qdump(self.SN,self.data,self.image)
-            if self.sigimage is not None and self.master.sigimage is not None \
-                  and self.verb:
+            if self.sigimage is not None and self.master.sigimage is not None:
                # Make the noise map of the difference image
-               var = np.power(self.csigma, 2) + np.power(self.sigma, 2)
                qdump(self.difference.replace('.fits','_sigma.fits'), 
                      np.sqrt(var), self.image)
       
@@ -1631,6 +1699,25 @@ class Observation:
       axs[0].imshow(sno, origin='lower', norm=norm, cmap='gray_r')
       axs[1].imshow(snt, origin='lower', norm=norm, cmap='gray_r')
       axs[2].imshow(snd, origin='lower', norm=norm, cmap='gray_r')
+      
+      # Plot the kernel as an inset to the convolved image
+      xidx = int(self.data.shape[1]/32)
+      yidx = int(self.data.shape[0]/32)
+
+      if self.pwid > -1:
+         pdata = self.grid[yidx-self.pwid:yidx+self.pwid,
+                           xidx-self.pwid:xidx+self.pwid]
+      else:
+         pdata = np.zeros((11,11))
+         pdata[5,5] = 1.0
+      norm = simple_norm(pdata, percent=99.8)
+      if self.rev:
+         inax = axs[0].inset_axes([0.8,0.8,0.18,0.18])
+      else:
+         inax = axs[1].inset_axes([0.8,0.8,0.18,0.18])
+      inax.imshow(pdata, origin='lower', norm=norm, cmap='gray_r')
+      inax.xaxis.set_visible(False)
+      inax.yaxis.set_visible(False)
 
       axs[1].set_yticklabels([])
       axs[2].set_yticklabels([])

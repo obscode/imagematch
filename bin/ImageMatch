@@ -60,6 +60,7 @@ autorev = False
 use_wcs = False
 registered = False
 nord = -1
+Niter = 3
 perr = 3.0
 ar = 
 pwid = 0
@@ -111,6 +112,8 @@ argv, thresh = rdarg(argv,"-t",float,cfg.sex.thresh)
 argv, nmax = rdarg(argv,"-n",int,cfg.sex.nmax)
 argv, min_sep = rdarg(argv,"-ms",float,cfg.sex.min_sep)
 argv, nord = rdarg(argv,"-o",int,cfg.match.nord)
+argv, Niter = rdarg(argv,"-niter",int,cfg.match.Niter)
+if Niter is None: Niter = 3
 argv, pwid = rdarg(argv,"-p",int,cfg.match.pwid)
 argv, perr = rdarg(argv,"-s",float,cfg.match.perr)
 argv, vcut = rdarg(argv,"-c",float,cfg.match.vcut)
@@ -235,7 +238,7 @@ if arev:
 
 [observation.GoCatGo(Master,verb=verb,rev=rev,xwin=xwin,ywin=ywin,
       perr=perr, skyoff=skyoff,pwid=pwid, nmax=nmax, 
-      min_sep=min_sep, nord=nord,spatial=spatial,mcut=mcut,
+      min_sep=min_sep, nord=nord, Niter=Niter, spatial=spatial,mcut=mcut,
       vcut=vcut,subt=subt,preserve=preserve,registered=registered,
       match=match, quick_convolve=quick_convolve, do_sex=sex, thresh=thresh,
       sexdir=sexdir, sexcmd=sexcmd, angles=angles, use_db=db, 

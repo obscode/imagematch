@@ -68,6 +68,9 @@ def ndf(nord):
    transformation.'''
    if nord == -1:
       Ncoeff = 2
+   elif nord == 0:
+      # rotation:  xoff, yoff, scale, rot
+      Ncoeff = 4
    else:
       Ncoeff = len(np.ravel(abasis(nord, np.array([0]), np.array([0]))))
    return Ncoeff
@@ -538,7 +541,7 @@ class Observation:
       return objects
 
    def objmatch(self,nord=0,perr=2,aerr=1.0, angles=[0.0],interactive=0,
-         use_db=0):
+         use_db=0, iter=3):
       '''Figure out which objects match up with which other objects in the
       image and template (master) frames.'''
       self.log("Matching "+self.master.image+" to "+self.image)
@@ -671,7 +674,7 @@ class Observation:
             keep = np.less(abs(x0-xt1-xshift),3*xscat)*\
                   np.less(abs(y0-yt1-yshift),3*yscat)
             x0,y0,x1,y1 = np.compress( keep, [x0,y0,x1,y1], 1)
-         Niter = 3
+         Niter = iter
 
       # At this point, we should have a set of matching x,y pairs in the
       # image and template frames
@@ -1058,6 +1061,9 @@ class Observation:
 
          # Now a bit of trickery to find non-repeating set of object numbers:
          objects = list(set(sat_objects))
+         if self.verb > 1:
+            with open('bad_objects','w') as fout:
+               [fout.write("{}\n".format(obj)) for obj in objects]
 
          # Now cut out the objects with saturated pixels.
          for obj in objects:
@@ -1067,6 +1073,8 @@ class Observation:
       seg = np.greater(self.seg,0.0).astype(np.float32)
       # put limit at 0.5, because mseg was transformed
       mseg = np.greater(self.mseg,0.5).astype(np.float32)
+      if self.verb > 1:
+         qdump('mseg.fits', mseg)
 
       gwid = max([2,1*self.pwid])
       self.bg,r = self.estimate_bg()
@@ -1085,6 +1093,8 @@ class Observation:
       # note by using np.less(zids, 0.02), we're effectively doing a fuzzy 
       #  'not'
       wt = VTKMultiply(seg, VTKMultiply(mseg, np.less(zids, 0.02)))
+      if self.verb > 1:
+         qdump('wt0.fits', wt)
       #print(np.sum(np.greater(wt, 0)))
 
       # throw out data that have very low values
@@ -1097,16 +1107,22 @@ class Observation:
       twt = np.less(lowids, 0.02).astype(np.float32)
       wt = VTKMultiply(np.greater(VTKGauss(wt,gwid,numret=1),
                                0.02).astype(np.float32),swt*twt)
+      if self.verb > 1:
+         qdump('wt1.fits', wt)
 
       # Throw out data on the boundaries twice as wide as the kernel
       insidex = between(self.ox,2*gwid,self.naxis1-2*gwid).astype(np.float32)
       insidey = between(self.oy,2*gwid,self.naxis2-2*gwid).astype(np.float32)
       wt = VTKMultiply(wt,VTKAnd(insidex, insidey))
+      if self.verb > 1:
+         qdump('wt2.fits', wt)
 
       # If the FITS header had masks in the header, then we mask that out too
       #  This is opposite of xwin,ywin:  it's want we want to keep OUT.
       # Note that xwin and ywin are now included in get_mask
       wt = VTKMultiply(wt, self.mask.get_mask())
+      if self.verb > 1:
+         qdump('wt3.fits', wt)
 
       if self.snpos is not None:
          self.log("Applying super nova mask at x=%f, y=%f" % \
@@ -1117,6 +1133,8 @@ class Observation:
          if self.maxdist > 0:
             cond = cond*np.less(dists, self.maxdist**2)
          wt = VTKMultiply(wt, cond.astype(np.float32))
+      if self.verb > 1:
+         qdump('wt4.fits', wt)
 
       # Get rid of any saturated pixels
 
@@ -1125,6 +1143,9 @@ class Observation:
       swt = VTKDilate(VTKOr(swt,twt),5,5,numret=1)
       swt = VTKGauss(swt,gwid,numret=1)
       wt = VTKMultiply(wt, VTKLessEqual(swt,0.02))
+      if self.verb > 1:
+         qdump('wt5.fits', wt)
+
       if self.sigimage:
          self.noise = self.sigma.astype(np.float64)
       else:
@@ -1477,7 +1498,8 @@ class Observation:
                sexdir="./sex", sexcmd='sex', starmin=0, maxdist=-1,
                angles=[0.0], use_db=0, interactive=0, starlist=None, 
                diff_size=None, bs=False, crowd=False, usewcs=False,
-               magcat=None, racol='RA', deccol='DEC', magcol='mag'):
+               magcat=None, racol='RA', deccol='DEC', magcol='mag',
+               Niter=3):
       self.master = master
       self.skyoff=skyoff
       self.pwid=pwid
@@ -1522,7 +1544,7 @@ class Observation:
          self.compute(nmax=nmax, min_sep=min_sep)
          self.master.compute(nmax=nmax, min_sep=min_sep)
          res = self.objmatch(nord=nord,perr=perr,angles=angles,
-               interactive=interactive, use_db=use_db)
+               interactive=interactive, use_db=use_db, iter=Niter)
          if res < 0:
             self.log('Failed object match... giving up.')
             return -1

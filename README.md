@@ -32,4 +32,4 @@ In addition, you will need to install `source extractor`(https://www.astromatic.
 
 ## Documentation
 
-For now, here's a quick guide:  https://code.obs.carnegiescience.edu/Algorithms/imagematch
+For now, here's a quick `howto guide\(https://docs.google.com/document/d/1uy8dLIXIRyIO1j3zj2XIDS4x5t6Zy5TDWzBtC0eZIRo/edit?usp=sharing).

@@ -38,6 +38,7 @@ store_bg = True
 [tasks]
 bs = True
 sex = True
+blur = 0
 match = True
 subt = True
 
@@ -102,6 +103,7 @@ else:
 argv, sex = rdarg(argv,"-sex",None,cfg.tasks.sex,single=1)
 argv, sexcmd = rdarg(argv, '-sexcmd', None, cfg.sex.sexcmd)
 argv, match = rdarg(argv,"-match",None,cfg.tasks.match,single=1)
+argv, blur = rdarg(argv, "-blur", float, cfg.tasks.blur)
 argv, sexdir = rdarg(argv,"-sexdir",None,cfg.sex.sexdir)
 argv, pakey = rdarg(argv,"-pakey",None,cfg.data.pakey)
 if pakey is None: pakey = 'rotangle'
@@ -244,6 +246,7 @@ if arev:
       sexdir=sexdir, sexcmd=sexcmd, angles=angles, use_db=db, 
       interactive=interactive, diff_size=diff_size, bs=bs, crowd=crowd, 
       usewcs=usewcs, starlist=starlist, magcat=magcat, racol=racol, 
-      deccol=deccol, magcol=magcol, starmin=starmin, maxdist=dmax) \
+      deccol=deccol, magcol=magcol, starmin=starmin, maxdist=dmax,
+      blur=blur) \
       for observation in Observations]
 

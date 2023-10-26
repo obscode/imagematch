@@ -23,6 +23,7 @@ from .VTKHelperFunctions import *  # all start with VTK, so this is okay :)
 from .ReadSex import readsex
 from astropy.io import fits as FITS
 from astropy.io import ascii
+from astropy.stats import gaussian_fwhm_to_sigma as f2s
 import numpy.fft as fft
 import numpy as np
 from .GaussianBG import GaussianBG
@@ -31,6 +32,7 @@ from .npextras import bwt, divz, between
 from .fitsutils import qdump
 from numpy import linalg
 from scipy.ndimage import map_coordinates
+from astropy.convolution import convolve_fft, Gaussian2DKernel
 import sys
 debug = 1
 try:
@@ -830,7 +832,7 @@ class Observation:
       self.nord = nord
       return 0
 
-   def imread(self, bs=False, usewcs=False):
+   def imread(self, bs=False, usewcs=False, blur=0):
       '''Read in the FITS data and assign to the member variables.  
       Optionall background subtract if bs=True'''
       if self.data is None:
@@ -849,10 +851,40 @@ class Observation:
          else:
             self.zp = None
 
+         self.fwhm = h.get('FWHM', None)
+
+         if self.master: 
+            self.master.imread(bs=bs, usewcs=usewcs)
+
          # Check for previously determind BG and SD
          if self.store_bg and 'IMMATBG' in h:
             self._bg = h['IMMATBG']
             self._r = h['IMMATSD']
+
+         # If we blur the image first:
+         if blur is not None and blur != 0:
+            if blur > 0:
+               k = Gaussian2DKernel(blur)
+               self.log("Blurring by Gaussian with sigma={}".format(blur))
+            else:
+               # figure it out automagically. Assume FWHM heders are in arcsec
+               if self.fwhm is not None and self.master.fwhm is not None and \
+                     self.fwhm < self.master.fwhm:
+                  blur = np.sqrt(self.master.fwhm**2-self.fwhm**2)*f2s
+                  blur = blur/self.scale
+                  if blur > 0.5:
+                     self.log("Blurring by Gaussian with sigma={}".format(blur))
+                     k = Gaussian2DKernel(blur)
+                  else:
+                     k = None
+               else:
+                  k = None
+            if k is not None:
+               self.data = convolve_fft(self.data, k)
+               # Save blurred imae for use with sextractor
+               newimage = self.image.replace('.fits','_blur.fits')
+               qdump(newimage, self.data, self.image)
+               self.image = newimage
 
          # Check for NaNs
          self.nans = np.isnan(self.data)
@@ -880,10 +912,6 @@ class Observation:
                                                np.float32),101)
          self.naxis1,self.naxis2 = h['NAXIS1'],\
                                    h['NAXIS2']
-         #f.close()
-         if self.master: 
-            self.master.imread(bs=bs, usewcs=usewcs)
-
          if self.sigimage is not None:
             self.log( "Reading in sigma map %s" % self.sigimage)
             #f = FITS.open(self.sigimage, memmap=False)
@@ -1499,7 +1527,7 @@ class Observation:
                angles=[0.0], use_db=0, interactive=0, starlist=None, 
                diff_size=None, bs=False, crowd=False, usewcs=False,
                magcat=None, racol='RA', deccol='DEC', magcol='mag',
-               Niter=3):
+               Niter=3, blur=0):
       self.master = master
       self.skyoff=skyoff
       self.pwid=pwid
@@ -1527,7 +1555,7 @@ class Observation:
       self.master.sexcmd = sexcmd
       self.master.thresh = thresh
       self.master.crowd = crowd
-      self.imread(bs=bs, usewcs=usewcs)
+      self.imread(bs=bs, usewcs=usewcs, blur=blur)
       self.readcat(magcat, racol, deccol, magcol)
       self.master.readcat(magcat, racol, deccol, magcol)
       if self.snpos is not None:
@@ -1540,6 +1568,7 @@ class Observation:
          self.starlist = np.loadtxt(starlist)
       else:
          self.starlist = None
+
       if not registered:
          self.compute(nmax=nmax, min_sep=min_sep)
          self.master.compute(nmax=nmax, min_sep=min_sep)

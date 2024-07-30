@@ -678,6 +678,14 @@ class Observation:
             x0,y0,x1,y1 = np.compress( keep, [x0,y0,x1,y1], 1)
          Niter = iter
 
+      # If specified, remove distant points
+      if self.maxdist > 0 and self.snpos is not None:
+         # throw out distant points for coordinate transformation
+         sni,snj = self.snpos.topixel()
+         dists = np.sqrt((x0-sni)**2 + (y0 - snj)**2)
+         close = np.less(dists, self.maxdist)
+         x0,y0,x1,y1 = np.compress(close, [x0,y0,x1,y1], 1)
+
       # At this point, we should have a set of matching x,y pairs in the
       # image and template frames
       Nmatches = len(x0)
@@ -723,6 +731,14 @@ class Observation:
       elif "MAG_AUTO" in self.master.sexdata: 
          allm1 = np.array(self.master.sexdata["MAG_AUTO"])
       allq1 = np.array(self.master.sexdata["FLAGS"])
+
+      if self.maxdist > 0 and self.snpos is not None:
+         # throw out distant points for coordinate transformation
+         sni,snj = self.snpos.topixel()
+         dists = np.sqrt((allx0-sni)**2 + (ally0-snj)**2)
+         close = np.less(dists, self.maxdist)
+         allx0,ally0,star0,allm0,allq0 = np.compress(close,
+               [allx0,ally0,star0,allm0,allq0], 1)
 
       #np.savetxt('pass0_matches.np',[x0,y0,x1,y1])
       #np.savetxt('allx0s.np', [allx0,ally0])
@@ -832,7 +848,7 @@ class Observation:
       self.nord = nord
       return 0
 
-   def imread(self, bs=False, usewcs=False, blur=0):
+   def imread(self, bs=False, blur=0):
       '''Read in the FITS data and assign to the member variables.  
       Optionall background subtract if bs=True'''
       if self.data is None:
@@ -854,7 +870,7 @@ class Observation:
          self.fwhm = h.get('FWHM', None)
 
          if self.master: 
-            self.master.imread(bs=bs, usewcs=usewcs)
+            self.master.imread(bs=bs)
 
          # Check for previously determind BG and SD
          if self.store_bg and 'IMMATBG' in h:
@@ -897,11 +913,11 @@ class Observation:
             self.image = newimage
 
          # see if there is WCS info in the header
-         if usewcs and wcs is not None:
+         if wcs is not None:
             self.wcs = wcs.WCS(h)
-            #if self.wcs.types[0] is None or self.wcs.types[1] is None:
-            #   # Bad WCS
-            #   self.wcs = None
+            if not self.wcs.has_celestial:
+               self.log('WCS for %s has no celestial coordinates' % self.image)
+               self.wcs = None
             self.log('Loading WCS info for %s' % self.image)
             #if self.snra is not None and self.sndec is not None:
             #   self.snx,self.sny = self.wcs.topixel((self.snra,self.sndec))
@@ -933,7 +949,32 @@ class Observation:
             self.extras = None
 
 
-   def mktemplate(self,registered,usewcs=False,sol=None,mimage=None):
+   def blurImage(self, blur):
+     if blur > 0:
+        k = Gaussian2DKernel(blur)
+        self.log("Blurring by Gaussian with sigma={}".format(blur))
+     else:
+        # figure it out automagically. Assume FWHM heders are in arcsec
+        if self.fwhm is not None and self.master.fwhm is not None and \
+              self.fwhm < self.master.fwhm:
+           blur = np.sqrt(self.master.fwhm**2-self.fwhm**2)*f2s
+           blur = blur/self.scale
+           if blur > 0.5:
+              self.log("Blurring by Gaussian with sigma={}".format(blur))
+              k = Gaussian2DKernel(blur)
+           else:
+              k = None
+        else:
+           k = None
+     if k is not None:
+        self.data = convolve_fft(self.data, k)
+        # Save blurred imae for use with sextractor
+        newimage = self.image.replace('.fits','_blur.fits')
+        qdump(newimage, self.data, self.image)
+        self.image = newimage
+
+   def mktemplate(self,registered,usewcs=False,sol=None,mimage=None,
+                  blur=None):
       '''Transform the template (master) to the coordinates of the image.'''
       self.oy,self.ox = np.indices((self.naxis2,self.naxis1),np.float32)
 
@@ -975,9 +1016,8 @@ class Observation:
             # Here we don't bother with our own coordinate solution,
             #  we use the WCS in each image to do the coordinate
             #  transformation
-            uv0 = self.wcs.toworld(np.transpose([self.ox,self.oy]))
-            ixy = self.master.wcs.topixel(uv0).T
-            ix = ixy[0];  iy = ixy[1]
+            ux,uy = self.wcs.wcs_pix2world(self.ox,self.oy,0)
+            ix,iy = self.master.wcs.wcs_world2pix(ux,uy, 1)
             self.tx = ix - self.ox
             self.ty = iy - self.oy
          else:
@@ -1527,7 +1567,7 @@ class Observation:
                angles=[0.0], use_db=0, interactive=0, starlist=None, 
                diff_size=None, bs=False, crowd=False, usewcs=False,
                magcat=None, racol='RA', deccol='DEC', magcol='mag',
-               Niter=3, blur=0):
+               Niter=3, blur=None):
       self.master = master
       self.skyoff=skyoff
       self.pwid=pwid
@@ -1555,7 +1595,8 @@ class Observation:
       self.master.sexcmd = sexcmd
       self.master.thresh = thresh
       self.master.crowd = crowd
-      self.imread(bs=bs, usewcs=usewcs, blur=blur)
+      #self.imread(bs=bs, usewcs=usewcs, blur=blur)
+      self.imread(bs=bs)
       self.readcat(magcat, racol, deccol, magcol)
       self.master.readcat(magcat, racol, deccol, magcol)
       if self.snpos is not None:
@@ -1569,7 +1610,7 @@ class Observation:
       else:
          self.starlist = None
 
-      if not registered:
+      if not registered and not usewcs:
          self.compute(nmax=nmax, min_sep=min_sep)
          self.master.compute(nmax=nmax, min_sep=min_sep)
          res = self.objmatch(nord=nord,perr=perr,angles=angles,
@@ -1577,7 +1618,9 @@ class Observation:
          if res < 0:
             self.log('Failed object match... giving up.')
             return -1
-      self.mktemplate(registered, usewcs=False)
+      if blur is not None:
+         self.blurImage(blur)
+      self.mktemplate(registered, usewcs=usewcs)
       self.mkweight()
       if self.verb: qdump(self.weight, self.wt, self.image)
 

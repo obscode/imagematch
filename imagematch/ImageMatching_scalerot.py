@@ -1344,6 +1344,9 @@ class Observation:
             self.log( "Size of basis matrix:")
             self.log(str(basis.shape))
             self.dof = basis.shape[0]
+            if basis.shape[1] < basis.shape[0]:
+               raise RuntimeError("Error:  Not enough sources to constrain "\
+                     " kernel. Try increase decreasing threshold?")
             du,dv,dw = singular_value_decomposition(np.transpose(basis))
             it1 = time.time()
             self.log( "Decomposition in %.4fs." % (it1-it0))

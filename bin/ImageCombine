@@ -172,7 +172,7 @@ ref.do_sex = sex
 ref.sexdir = sexdir
 ref.sexcmd = sexcmd
 ref.thresh = thresh
-ref.imread(bs=bs, usewcs=usewcs)
+ref.imread(bs=bs)
 if clip:
    #f = fits.open(ref.image, memmap=False)[0].header
    f = fits.getheader(ref.image, memmap=False)
@@ -218,7 +218,7 @@ for o in Observations:
    ref.master.sexdir = sexdir
    ref.master.sexcmd = sexcmd
    ref.master.thresh = thresh
-   ref.master.imread(bs=bs, usewcs=usewcs)
+   ref.master.imread(bs=bs)
    ref.master.readcat()
    if not registered:
       ref.compute(nmax=nmax, min_sep=min_sep)

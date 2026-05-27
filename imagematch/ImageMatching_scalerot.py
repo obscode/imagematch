@@ -341,6 +341,7 @@ class Observation:
       self.saturate = saturate          # saturation value in image
 
       self.reject = reject              # completely reject saturated objects?
+      self.maxdist = -1                 # Only consider pixels < maxdist from SN
 
       # Try to figure some stuff out from the header
       #f = FITS.open(self.image, memmap=False)
@@ -609,8 +610,8 @@ class Observation:
             uv0 = self.wcs.wcs_pix2world(np.transpose([self.x,self.y]),1)
             uv1 = self.master.wcs.wcs_pix2world(
                   np.transpose([self.master.x,self.master.y]),1)
-            #np.savetxt('uv0', uv0)
-            #np.savetxt('uv1', uv1)
+            if self.verb > 1:  np.savetxt('uv0', uv0)
+            if self.verb > 1:  np.savetxt('uv1', uv1)
             c0 = SkyCoord(uv0[:,0], uv0[:,1], unit=(u.degree, u.degree))
             c1 = SkyCoord(uv1[:,0], uv1[:,1], unit=(u.degree, u.degree))
             idx,sep,dist = c0.match_to_catalog_sky(c1)
@@ -786,10 +787,10 @@ class Observation:
             f1 = np.power(10,-0.4*(m1-min(m1)))
             # not sure about the point here...
             wt = np.sqrt(f0+f1)# * 0.0 + 1
-            #if self.maxdist is not None and self.snpos is not None:
-            #   sni,snj = self.snpos.topixel()
-            #   dists = np.sqrt((x0 - sni)**2 + (y0 - snj)**2)
-            #   wt = wt*np.less(dists, self.maxdist)
+            if self.maxdist is not None and self.snpos is not None:
+               sni,snj = self.snpos.topixel()
+               dists = np.sqrt((x0 - sni)**2 + (y0 - snj)**2)
+               wt = wt*np.less(dists, self.maxdist)
 
             Nmatches = len(x0)
             if nord < nord0:
@@ -811,7 +812,8 @@ class Observation:
             ixy = np.add.reduce(sol[NA,::]*basis,1)
             ix,iy = ixy[:len(np.ravel(x0))], ixy[len(np.ravel(x0)):]
 
-         Nmatches = len(x0)
+         #Nmatches = len(x0)
+         Nmatches = np.sum(np.greater(wt, 0))/2
          self.log( "Pass %d, with %d objects." % (iter+1,Nmatches))
          if nord==-1:
             self.log("  xshift: %.3f   yshift:  %.3f" % tuple(sol[0:2]))
@@ -824,6 +826,9 @@ class Observation:
             self.log( str(sol))
          delx = ix-x1
          dely = iy-y1
+         if self.verb > 1:
+             np.savetxt("coord_resids.txt", [x1, y1, delx, dely])
+
          dels = np.sqrt(np.power(delx,2) + np.power(dely,2))
          scx = bwt(delx)[1]
          scy = bwt(dely)[1]
@@ -1028,7 +1033,7 @@ class Observation:
             self.ty = iy - self.oy
          self.log( "Transforming...")
          # Let's try geomap like thing
-         self.timage = map_coordinates(mimage, [iy, ix], order=3,
+         self.timage = map_coordinates(mimage, [iy, ix], order=1,
                mode='constant', cval=0)
          #self.timage = VTKImageTransform(mimage,self.tx,self.ty,numret=1,
          #                                cubic=0,interp=1,constant=0)
@@ -1220,6 +1225,7 @@ class Observation:
          n2 = VTKSubtract(self.data,self.bg)
          self.noise = VTKSqrt(VTKAdd(n2,pow(r,2)))
       self.invnoise = VTKInvert(self.noise)
+      self.invnoise = np.where(np.isnan(self.invnoise), 0.0, self.invnoise)
       if self.master.sigimage:
          self.master.noise = self.master.sigma
       else:

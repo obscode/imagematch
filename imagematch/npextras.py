@@ -41,7 +41,7 @@ def rms( x,y=None):
 
 
 def getexp(x,flo=-1000,fhi=1000):
-    x2 = x.astype(longfloat)
+    x2 = x.astype(longdouble)
     y = greater(x2,flo)*less(x2,fhi)
     y2 = isfinite(x2)
     y = logical_and(y,y2)

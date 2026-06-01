@@ -164,6 +164,7 @@ argv, magmax = rdarg(argv, "-magmax", float, cfg.data.magmax)
 argv, magmin = rdarg(argv, "-magmin", float, cfg.data.magmin)
 argv, magmax2 = rdarg(argv, "-magmax2", float, cfg.data.magmax2)
 argv, magmin2 = rdarg(argv, "-magmin2", float, cfg.data.magmin2)
+argv, logfile = rdarg(argv, "-logfile", None, cfg.data.logfile)
 
 libdir=os.path.realpath(os.path.dirname(imagematch.__file__))
 
@@ -211,7 +212,7 @@ if verb2:  verb = 2
 Observations = [Observation(image,scale=scale,pakey=pakey,saturate=saturate,\
                skylev=skylev, sigsuf=sigsuf, wtype=wtype, mask_file=imask_file, 
                reject=reject, snx=snx, sny=sny, snmaskr=snmaskr, hdu=hdu,
-               magmax=magmax, magmin=magmin, store_bg=store_bg) \
+               magmax=magmax, magmin=magmin, store_bg=store_bg, logfile=logfile) \
                 for image in images]
 
 Epochs = [observation.epoch for observation in Observations]
@@ -232,7 +233,6 @@ else:
    Master = Observations[-1]
    Master.mask_file = mmask_file
 
-print(Master.sigimage)
 
 if arev:
    # Do the auto-reverse logic

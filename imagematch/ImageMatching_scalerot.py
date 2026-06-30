@@ -1664,8 +1664,8 @@ class Observation:
 
             # Condistion we're testing:  rdvs are larger for deconvolve
             idx = len(rdv1)//2
-            self.log("AUTO:",np.sum(rdv1[:idx]<rdv2[:idx]), 
-                          np.sum(rdv1[:idx]<rdv2[idx])/idx)
+            self.log("AUTO: {} {}".format(np.sum(rdv1[:idx]<rdv2[:idx]), 
+                          np.sum(rdv1[:idx]<rdv2[idx])/idx))
             if np.sum(rdv1[:idx] < rdv2[:idx])/len(rdv1[:idx]) > 0.5:
                # Switch back to forward
                self.log("AUTO:  Using forward matching")

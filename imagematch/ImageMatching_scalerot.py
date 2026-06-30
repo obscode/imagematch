@@ -178,8 +178,54 @@ class Point:
 
          return(x,y)
 
+class Line:
+   '''An object that defines a masked line through an image. Could be a 
+   satellite or diffraction spike.'''
+
+   def __init__(self, x0, y0, x1, y1, width, image=None):
+      '''Initialize a line through (x0,y0) and (x1, y1). The width
+      tells us the width of the line to mask in pixels. If image is
+      given, then we can compute WCS and use world coordinates for
+      (x0,y0) and (x1,y1)'''
+      self.p0 = Point(x0, y0)
+      self.p1 = Point(x1, y1)
+      self.width = width
+      self.image = image
+
+   def get_mask(self):
+      '''Return the mask for the image'''
+      x1,y1 = self.p0.topixel()
+      x2,y2 = self.p1.topixel()
+      
+      if (x2-x1)**2 + (y2-y1)**2 < 1:
+         raise ValueError("Linear masks must have endpoints further" \
+                          " than one pixel from each other")
+
+      # Test points. Check if already defined
+      ox = getattr(self.image, 'ox', None)
+      oy = getattr(self.image, 'oy', None)
+      if ox is None or oy is None:
+         oy,ox = np.indices((self.image.naxis2,self.image.naxis1),np.float32)
+
+      # Now check to see which points are within self.width of the line
+      num = np.absolute((y2-y1)*ox - (x2-x1)*oy + x2*y1 - y2*x1)
+      denom = np.sqrt((y2-y1)**2 + (x2-x1)**2)
+      return np.greater(num/denom, width)
+   
+   def __repr__(self):
+
+      x1,y1 = self.p0.topixel()
+      x2,y2 = self.p1.topixel()
+      st = "Masked line from ({},{}) to ({},{}), width={}".format(
+         x1,y1,x2,y2,self.width
+      )
+      return st
+
+
+
 class Mask:
-   '''An object that defines a mask for an image.'''
+   '''An object that defines a mask for an image. We use the boolean
+   logic that True implies "good data".'''
 
    def __init__(self, image):
       '''[image] is an Observation class.'''
@@ -187,6 +233,8 @@ class Mask:
       self.llcs = []    # lower-left corners... point classes
       self.urcs = []    # upper-right corners... point classes
       self.sides = []   # 0 --> mask out interior  1 --> mask out exterior
+      self.lines = []   # lines to mask out, like satellites
+      self.bpm = None   # Mask defined in a boolean FITS file
 
    def __repr__(self):
       st = "Masks:\n"
@@ -197,7 +245,23 @@ class Mask:
             st += "\t[%.1f:%.1f,%.1f:%.1f] = False\n" % (i0,i1,j0,j1)
          else:
             st += "\t[%.1f:%.1f,%.1f:%.1f] = True\n" % (i0,i1,j0,j1)
+      for l in self.lines:
+         st += l.__repr___()
       return st
+
+   def add_bpm_file(self, filename, good=False):
+      '''Add a mask file (FITS) as a boolean 2D mask. Good pixels
+      are assumed to be 0 (False), set to good=True if otherwise'''
+      if not os.path.exists(filename):
+         raise ValueError("No such mask file {} found".format(filename))
+      try:
+         h,d = qload(filename, 0)
+      except:
+         raise ValueError("Problem loading mask file {}".format(filename))
+      self.bpm = d.astype(bool)
+      if not good:
+         self.bpm = ~self.bpm
+      
 
    def add_mask(self, x0, y0, x1, y1, sense='inside'):
       '''Add a box mask.  If [sense] is 'inside' mask the interior pixels, 
@@ -215,6 +279,10 @@ class Mask:
          self.sides.append(0)
       else:
          self.sides.append(1)
+   
+   def add_line_mask(self, x0, y0, x1, y1, width):
+      '''Add a line-segment mask for things like satellites'''
+      self.lines.append(Line(x0, y0, x1, y1, width, self.image))
 
    def get_mask(self):
       '''Based on the current masks, return the end result.'''
@@ -222,7 +290,13 @@ class Mask:
       oy = getattr(self.image, 'oy', None)
       if ox is None or oy is None:
          oy,ox = np.indices((self.image.naxis2,self.image.naxis1),np.float32)
-      mask = np.ones((self.image.naxis2,self.image.naxis1), np.float32)
+      if self.bpm is None:
+         mask = np.ones((self.image.naxis2,self.image.naxis1), np.float32)
+      else:
+         if self.bpm.shape[0] != self.image.naxis2 or \
+            self.bpm.shape[1] != self.image.naxis1:
+            raise ValueError("Error:  BPM file has inconsistent shape")
+         mask = self.bpm
       for i in range(len(self.llcs)):
          i0,j0 = self.llcs[i].topixel()
          i1,j1 = self.urcs[i].topixel()
@@ -271,19 +345,19 @@ class Observation:
          saturate=30000, skylev=None, sigsuf=None, wtype="MAP_RMS", 
          mask_file=None, reject=0, snx=None, sny=None, snmaskr=10.0, 
          extra_sufs=[], hdu=0, magmin=None, magmax=None, store_bg=True,
-         logfile=None):
+         bpmsuf=None, logfile=None):
 
       self.image = image   # The image name
       self.hdu = hdu
       self.magmin = magmin
       self.magmax = magmax
       self.store_bg = store_bg
+
       if logfile is None:
          self.log_stream = sys.stdout
       else:
          self.log_stream = open(logfile, 'w')
       
-
       #base = os.path.basename(image)
       base = image
       self.catalog = base.replace(".fits",".cat")  # Output catalog of objects
@@ -396,10 +470,30 @@ class Observation:
       if mask_file is not None:
          mf = open(mask_file,'r')
          for line in mf.readlines():
-            x0,y0,x1,y1 = line.split()
-            self.mask.add_mask(x0,y0,x1,y1, sense='inside')
-            self.log('Adding mask: %s %s %s %s' % (x0,y0,x1,y1))
+            fs = line.split()
+            if len(fs) == 4:    # default box mask
+               x0,y0,x1,y1 = fs
+               self.mask.add_mask(x0,y0,x1,y1, sense='inside')
+               self.log('Adding mask: %s %s %s %s' % (x0,y0,x1,y1))
+            else:
+               typ,x0,y0,x1,y1 = fs[0:5]  # type info included
+               if typ.lower() == 'box':
+                  self.mask.add_mask(x0,y0,x1,y1, sense='inside')
+                  self.log('Adding mask: %s %s %s %s' % (x0,y0,x1,y1))
+               elif typ.lower() == 'line':
+                  if len(fs) < 6:
+                     raise ValueError("Line mask should have 6 fields:"\
+                                      " type,x0,y0,x1,y1,width")
+                  self.mask.add_line_mask(x0,y0,x1,y1,float(fs[5]))
+                  self.log('Adding line mask: %s %s %s %s' % (x0,y0,x1,y1))
+
          mf.close()
+      if bpmsuf is not None:
+         bpmfile = image.replace('.fits',bpmsuf+".fits")
+         if os.path.exists(bpmfile):
+            self.log("Adding BPM mask {}".format(bpmfile))
+            self.mask.add_bpm_file(bpmfile, good=False)
+
       self.pa = header.get(pakey, "N/A")
       if self.pa == "N/A": self.pa = 0.0
       #f.close()
@@ -890,7 +984,7 @@ class Observation:
             self.master.imread(bs=bs)
 
          # Check for previously determind BG and SD
-         if self.store_bg and 'IMMATBG' in h:
+         if self.store_bg and 'IMMATBG' in h and 'IMMATSD' in h:
             self._bg = h['IMMATBG']
             self._r = h['IMMATSD']
 
@@ -1250,6 +1344,8 @@ class Observation:
       if self.pwid > -1: 
          wt = VTKIslandRemoval(wt,1.0,0.0,max([3,self.pwid])**2,numret=1)
       self.wt = wt.astype(np.float32)
+      # Get rid of any possible problems
+      self.wt = np.where(np.isnan(self.wt), 0, self.wt)
 
    def mkmatch(self,preserve,quick_convolve=0, Niter=1):
       '''Here's where the kernel is solved.  Need to work on comments here.
@@ -1651,7 +1747,7 @@ class Observation:
             extras=[('BACKGND',self.bg)])
 
       if match:
-         if self.rev == 'auto':
+         if self.rev == 'auto' and self.pwid > 1:
             # Do both forward and reverse and figure out which kernel
             # is more well-behaved (not de-convolving)
             self.rev = False
@@ -1774,16 +1870,6 @@ class Observation:
       fig,axs = plt.subplots(1,3,figsize=(15,5), 
             dpi=rcParams['figure.dpi']*0.7)
       plt.subplots_adjust(wspace=0)
-      #if self.rev:
-      #   data = self.match + self.bg
-      #   temp = (self.timage - self.tbg)*self.exptime/self.master.exptime \
-      #         + self.bg
-      #   diff = (self.match + self.bg) - (self.timage - self.tbg)*\
-      #         self.exptime/self.master.exptime/self.fluxrat
-      #else:
-      #   data = self.data
-      #   temp = (self.match + self.bg)
-      #   diff = (self.data - self.match)
       if self.rev:
          data = self.match
          temp = (self.timage - self.tbg)*self.exptime/self.master.exptime

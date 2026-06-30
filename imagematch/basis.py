@@ -12,7 +12,7 @@ def svdfit(b,y):
       sol1 = transpose(decomp[2])
       sol2 = divz(1.0,decomp[1])
       sol3 = dot(transpose(decomp[0]),y)
-      if sometrue(sol3):
+      if any(sol3):
         solr = (sol2*sol3)
         soll = dot(sol1,solr)
       else:

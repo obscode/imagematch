@@ -18,6 +18,7 @@
 '''
 import gc
 import time,os
+import subprocess
 from .fitsutils import qdump, qload
 from .VTKHelperFunctions import *  # all start with VTK, so this is okay :)
 from .ReadSex import readsex
@@ -45,6 +46,9 @@ except:
    plt = None
 try:
    from astropy import wcs
+   import warnings
+   from astropy.wcs import FITSFixedWarning
+   warnings.simplefilter('ignore', category=FITSFixedWarning)
 except:
    wcs = None
 from astropy.coordinates import SkyCoord
@@ -341,7 +345,7 @@ class Observation:
          saturate=30000, skylev=None, sigsuf=None, wtype="MAP_RMS", 
          mask_file=None, reject=0, snx=None, sny=None, snmaskr=10.0, 
          extra_sufs=[], hdu=0, magmin=None, magmax=None, store_bg=True,
-         bpmsuf=None, verbose=True, log_stream=None):
+         bpmsuf=None, logfile=None):
 
       self.image = image   # The image name
       self.hdu = hdu
@@ -349,11 +353,11 @@ class Observation:
       self.magmax = magmax
       self.store_bg = store_bg
 
-      self.verbose = verbose
-      # Keep a logfile
-      #self.log_stream = open(self.image.replace('.fits','')+'.log', 'w')
-      self.log_stream = log_stream
-
+      if logfile is None:
+         self.log_stream = sys.stdout
+      else:
+         self.log_stream = open(logfile, 'w')
+      
       #base = os.path.basename(image)
       base = image
       self.catalog = base.replace(".fits",".cat")  # Output catalog of objects
@@ -417,6 +421,7 @@ class Observation:
       self.saturate = saturate          # saturation value in image
 
       self.reject = reject              # completely reject saturated objects?
+      self.maxdist = -1                 # Only consider pixels < maxdist from SN
 
       # Try to figure some stuff out from the header
       #f = FITS.open(self.image, memmap=False)
@@ -496,12 +501,17 @@ class Observation:
       self.nans = None   # where the data are NaN
       self.master = None
 
-   def log(self, message):
+   def log(self, message, nonewline=False):
       '''Quick function to print log information to the screen and also keep 
       a copy in a specified log file.'''
-      if self.verbose:  print(message)
-      if self.log_stream is not None:
-         self.log_stream.write(str(message)+'\n')
+      if not nonewline:
+         message = str(message) + '\n'
+      else:
+         message = str(message)
+
+      self.log_stream.write(message)
+      if nonewline:
+         self.log_stream.flush()
 
    def __repr__(self):
       '''Give the user a nice representation of the object.'''
@@ -513,29 +523,32 @@ class Observation:
 
       if self.sexdir[-1] != "/": self.sexdir += "/"
       self.sexcom = [self.sexcmd,self.image]
-      self.sexcom += ["-c "+self.sexdir+"default.sex"]
-      self.sexcom += ["-PARAMETERS_NAME "+self.sexdir+"default.param"]
-      if self.sigimage: self.sexcom += ["-WEIGHT_IMAGE "+self.sigimage]
-      if self.sigimage: self.sexcom += ["-WEIGHT_TYPE %s" % self.wtype]
-      self.sexcom += ["-DETECT_MINAREA 5"]
-      self.sexcom += ["-DETECT_THRESH "+str(self.thresh)]
-      self.sexcom += ["-ANALYSIS_THRESH "+str(self.thresh)]
-      self.sexcom += ["-PIXEL_SCALE "+str(self.scale)]
-      self.sexcom += ["-SEEING_FWHM "+str(0.8/self.scale)]
+      self.sexcom += ["-c",self.sexdir+"default.sex"]
+      self.sexcom += ["-PARAMETERS_NAME",self.sexdir+"default.param"]
+      if self.sigimage: self.sexcom += ["-WEIGHT_IMAGE",self.sigimage]
+      if self.sigimage: self.sexcom += ["-WEIGHT_TYPE", str(self.wtype)]
+      self.sexcom += ["-DETECT_MINAREA", "5"]
+      self.sexcom += ["-DETECT_THRESH", str(self.thresh)]
+      self.sexcom += ["-ANALYSIS_THRESH", str(self.thresh)]
+      self.sexcom += ["-PIXEL_SCALE", str(self.scale)]
+      self.sexcom += ["-SEEING_FWHM", str(0.8/self.scale)]
       self.sexcom += ["-CATALOG_NAME",self.catalog]
-      self.sexcom += ["-CHECKIMAGE_TYPE SEGMENTATION"]
-      self.sexcom += ["-CHECKIMAGE_NAME "+self.segmap]
-      self.sexcom += ["-FILTER_NAME "+self.sexdir+"gauss_3.0_5x5.conv"]
-      self.sexcom += ["-STARNNW_NAME "+self.sexdir+"default.nnw"]
-      self.sexcom += ["-SATUR_LEVEL "+str(self.saturate)]
-      self.sexcom += ["-DEBLEND_MINCONT 1"]
-      self.sexcom += ["-VERBOSE_TYPE QUIET"]
+      self.sexcom += ["-CHECKIMAGE_TYPE", "SEGMENTATION"]
+      self.sexcom += ["-CHECKIMAGE_NAME", self.segmap]
+      self.sexcom += ["-FILTER_NAME", self.sexdir+"gauss_3.0_5x5.conv"]
+      self.sexcom += ["-STARNNW_NAME", self.sexdir+"default.nnw"]
+      self.sexcom += ["-SATUR_LEVEL", str(self.saturate)]
+      self.sexcom += ["-DEBLEND_MINCONT", "1"]
+      self.sexcom += ["-VERBOSE_TYPE", "QUIET"]
       if self.zp is not None:
-         self.sexcom += ["-MAG_ZEROPOINT " + str(self.zp)]
-      self.sexcom = ' '.join(self.sexcom)
+         self.sexcom += ["-MAG_ZEROPOINT", str(self.zp)]
+      #self.sexcom = ' '.join(self.sexcom)
       if self.verb:
          self.log("Running {}".format(self.sexcom))
-      os.system(self.sexcom)
+      res = subprocess.run(self.sexcom, capture_output=True, text=True)
+      self.log(res.stdout.strip())
+      self.log(res.stderr.strip())
+      #os.system(self.sexcom)
 
    def readcat(self, magcat=None, racol='RA', deccol='DEC', magcol='rmag'):
       '''Read the SExtractor output.'''
@@ -705,8 +718,8 @@ class Observation:
             uv0 = self.wcs.wcs_pix2world(np.transpose([self.x,self.y]),1)
             uv1 = self.master.wcs.wcs_pix2world(
                   np.transpose([self.master.x,self.master.y]),1)
-            #np.savetxt('uv0', uv0)
-            #np.savetxt('uv1', uv1)
+            if self.verb > 1:  np.savetxt('uv0', uv0)
+            if self.verb > 1:  np.savetxt('uv1', uv1)
             c0 = SkyCoord(uv0[:,0], uv0[:,1], unit=(u.degree, u.degree))
             c1 = SkyCoord(uv1[:,0], uv1[:,1], unit=(u.degree, u.degree))
             idx,sep,dist = c0.match_to_catalog_sky(c1)
@@ -882,10 +895,10 @@ class Observation:
             f1 = np.power(10,-0.4*(m1-min(m1)))
             # not sure about the point here...
             wt = np.sqrt(f0+f1)# * 0.0 + 1
-            #if self.maxdist is not None and self.snpos is not None:
-            #   sni,snj = self.snpos.topixel()
-            #   dists = np.sqrt((x0 - sni)**2 + (y0 - snj)**2)
-            #   wt = wt*np.less(dists, self.maxdist)
+            if self.maxdist is not None and self.snpos is not None:
+               sni,snj = self.snpos.topixel()
+               dists = np.sqrt((x0 - sni)**2 + (y0 - snj)**2)
+               wt = wt*np.less(dists, self.maxdist)
 
             Nmatches = len(x0)
             if nord < nord0:
@@ -907,7 +920,8 @@ class Observation:
             ixy = np.add.reduce(sol[NA,::]*basis,1)
             ix,iy = ixy[:len(np.ravel(x0))], ixy[len(np.ravel(x0)):]
 
-         Nmatches = len(x0)
+         #Nmatches = len(x0)
+         Nmatches = np.sum(np.greater(wt, 0))/2
          self.log( "Pass %d, with %d objects." % (iter+1,Nmatches))
          if nord==-1:
             self.log("  xshift: %.3f   yshift:  %.3f" % tuple(sol[0:2]))
@@ -920,6 +934,9 @@ class Observation:
             self.log( str(sol))
          delx = ix-x1
          dely = iy-y1
+         if self.verb > 1:
+             np.savetxt("coord_resids.txt", [x1, y1, delx, dely])
+
          dels = np.sqrt(np.power(delx,2) + np.power(dely,2))
          scx = bwt(delx)[1]
          scy = bwt(dely)[1]
@@ -931,12 +948,10 @@ class Observation:
          # Save matches for later use
          f = open(self.db, 'w')
          for i in range(len(x0)):
-            #print >>f, x0[i],y0[i]
             f.write("{} {}\n".format(x0[i],y0[i]))
          f.close()
          f = open(self.master.db, 'w')
          for i in range(len(x0)):
-            #print >>f, x1[i],y1[i]
             f.write("{} {}\n".format(x1[i],y1[i]))
          f.close()
 
@@ -958,7 +973,7 @@ class Observation:
             if type(h['ZP']) is type(1.0):
                self.zp = h['ZP']
             else:
-               print("Warning: FITS header ZP is present, but not a float")
+               self.log("Warning: FITS header ZP is present, but not a float")
                self.zp = None
          else:
             self.zp = None
@@ -1000,7 +1015,7 @@ class Observation:
 
          # Check for NaNs
          self.nans = np.isnan(self.data)
-         if np.sometrue(self.nans):
+         if np.any(self.nans):
             # Keep track of where they were
             self.data = np.where(self.nans, 0.0, self.data)
             # make a new file, since sextractor is messed up by NaNs
@@ -1259,7 +1274,6 @@ class Observation:
       wt = VTKMultiply(seg, VTKMultiply(mseg, np.less(zids, 0.02)))
       if self.verb > 1:
          qdump('wt0.fits', wt)
-      #print(np.sum(np.greater(wt, 0)))
 
       # throw out data that have very low values
       lowids = np.less(self.data, self.bg-5*r).astype(np.float32)
@@ -1316,6 +1330,7 @@ class Observation:
          n2 = VTKSubtract(self.data,self.bg)
          self.noise = VTKSqrt(VTKAdd(n2,pow(r,2)))
       self.invnoise = VTKInvert(self.noise)
+      self.invnoise = np.where(np.isnan(self.invnoise), 0.0, self.invnoise)
       if self.master.sigimage:
          self.master.noise = self.master.sigma
       else:
@@ -1421,8 +1436,7 @@ class Observation:
                basis.append(cwt*np.take(flatimage,
                      (coy+self.jj[k])*self.naxis1 + (cox+self.ii[k])))
                if k % step == 0:
-                  sys.stdout.write(".")
-                  sys.stdout.flush()
+                  self.log('.', nonewline=True)
  
             if self.skyoff: basis = np.concatenate([basis,
                [np.ones(f0.shape,np.float64)]])
@@ -1591,7 +1605,7 @@ class Observation:
          gridin = np.logical_not(np.fmod(self.ox+dgridx,dgridx*2.0)) * \
                   np.logical_not(np.fmod(self.oy+dgridy,dgridy*2.0))
          gridin = gridin.astype(np.int8)
-         sys.stdout.write("Constructing matched image.\n")
+         self.log("Constructing matched image.\n")
          it0 = time.time()
          if quick_convolve:
             self.match = self.quick_convolve(basisimage, grid=0)
@@ -1601,7 +1615,7 @@ class Observation:
          else:
             for k in range(ll):
                if k % step == 0:
-                  sys.stdout.write(".");sys.stdout.flush()
+                  self.log('.', nonewline=True)
                self.match += self.component(k,matching=basisimage)
                self.grid += self.component(k,matching=gridin,grid=1)
                if basis_sigma is not None:
@@ -1634,17 +1648,14 @@ class Observation:
       data[dy:my, dx:mx] = matching[:,:]
 
       Fdata = fft.rfft2(data)
-      sys.stdout.write('.'*8)
-      sys.stdout.flush()
+      self.log('.'*8, nonewline=True)
       del data
       Fkernel = fft.rfft2(kernel)
-      sys.stdout.write('.'*8)
-      sys.stdout.flush()
+      self.log('.'*8, nonewline=True)
       np.multiply(Fdata, Fkernel, Fdata)
       del Fkernel
       convolved = fft.irfft2(Fdata, s=kernel.shape)
-      sys.stdout.write('.'*8)
-      sys.stdout.flush()
+      self.log('.'*8)
       convolved = convolved[kshape[0]-1:shape[0]+kshape[0]-1,
                             kshape[1]-1:shape[1]+kshape[1]-1]
       return(convolved) 
@@ -1670,6 +1681,7 @@ class Observation:
                magcat=None, racol='RA', deccol='DEC', magcol='mag',
                Niter=3, blur=None):
       self.master = master
+      self.master.log_stream = self.log_stream
       self.skyoff=skyoff
       self.pwid=pwid
       if xwin and ywin:
@@ -1748,7 +1760,7 @@ class Observation:
 
             # Condistion we're testing:  rdvs are larger for deconvolve
             idx = len(rdv1)//2
-            print("AUTO:",np.sum(rdv1[:idx]<rdv2[:idx]), 
+            self.log("AUTO:",np.sum(rdv1[:idx]<rdv2[:idx]), 
                           np.sum(rdv1[:idx]<rdv2[idx])/idx)
             if np.sum(rdv1[:idx] < rdv2[:idx])/len(rdv1[:idx]) > 0.5:
                # Switch back to forward

@@ -144,6 +144,7 @@ argv, preserve = rdarg(argv,"-preserve",None,cfg.match.preserve,single=1)
 argv, sigsuf = rdarg(argv,"-sig",None,cfg.data.sigsuf)
 argv, wtype = rdarg(argv,"-wtype",None,cfg.data.wtype)
 argv, imask_file = rdarg(argv, "-imask", None,cfg.data.imask)
+argv, bpmsuf = rdarg(argv, "-bpm", None,cfg.data.bpmsuf)
 argv, mmask_file = rdarg(argv, "-mmask", None,cfg.data.mmask)
 argv, snx = rdarg(argv, "-snx", None, cfg.data.snx)
 argv, sny = rdarg(argv, "-sny", None, cfg.data.sny)
@@ -211,7 +212,7 @@ if verb2:  verb = 2
 Observations = [Observation(image,scale=scale,pakey=pakey,saturate=saturate,\
                skylev=skylev, sigsuf=sigsuf, wtype=wtype, mask_file=imask_file, 
                reject=reject, snx=snx, sny=sny, snmaskr=snmaskr, hdu=hdu,
-               magmax=magmax, magmin=magmin, store_bg=store_bg) \
+               magmax=magmax, magmin=magmin, store_bg=store_bg, bpmsuf=bpmsuf) \
                 for image in images]
 
 Epochs = [observation.epoch for observation in Observations]
@@ -227,7 +228,8 @@ if master:
                               saturate=saturate2,
                               skylev=skylev2, sigsuf=sigsuf, wtype=wtype, 
                               mask_file=mmask_file, reject=reject, hdu=hdu,
-                              magmax=magmax2, magmin=magmin2, store_bg=store_bg)
+                              magmax=magmax2, magmin=magmin2, store_bg=store_bg,
+                              bpmsuf=bpmsuf)
 else: 
    Master = Observations[-1]
    Master.mask_file = mmask_file

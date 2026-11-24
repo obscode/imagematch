@@ -105,3 +105,45 @@ class config:
    def __dir__(self):
       '''implement this to get auto-complete in ipython.'''
       return self.__dict__['sections']
+
+def fixConfig(cfgfile):
+   '''Update an older config file to the new format.  This is a one-time operation.'''
+   cfg = config(cfgfile)
+   if hasattr(cfg, "rect") and hasattr(cfg.rect, 'use_wcs') and \
+      hasattr(cfg.sex, 'use_wcs'):
+      return cfg
+   if hasattr(cfg.match, 'use_wcs'):
+      print("Warning: This is an older config format, saving to new format")
+      print("  Old config file will be renamed to %s.old" % cfgfile)
+
+      os.rename(cfgfile, cfgfile+'.old')
+
+      cfg.cf['rect'] = {}
+      cfg.cf.set('rect','use_wcs',cfg.cf.get('match','use_wcs'))
+      cfg.cf.remove_option('match','use_wcs')
+      cfg.cf.set('rect','registered',cfg.cf.get('match','registered'))
+      cfg.cf.remove_option('match','registered')
+      cfg.cf.set('rect','nord',cfg.cf.get('match','nord'))
+      cfg.cf.remove_option('match','nord')
+      cfg.cf.set('rect','Niter',"3")
+      cfg.cf.set('rect','perr',cfg.cf.get('match','perr'))
+      cfg.cf.remove_option('match','perr')
+      cfg.cf.set('rect','crowd',cfg.cf.get('match','crowd'))
+      cfg.cf.remove_option('match','crowd')
+      cfg.cf.set('rect','db',cfg.cf.get('match','db'))
+      cfg.cf.remove_option('match','db')
+      cfg.cf.set('rect','starlist',cfg.cf.get('match','starlist'))
+      cfg.cf.remove_option('match','starlist')
+      cfg.cf.set('rect','starmin',cfg.cf.get('match','starmin'))
+      cfg.cf.remove_option('match','starmin')
+      cfg.cf.set('sex','use_wcs',cfg.cf.get('rect','use_wcs'))
+      with open(cfgfile,'w') as f:
+         cfg.cf.write(f)
+      cfg = config(cfgfile)
+      return cfg
+   else:
+      print("Config file is not compatible with this version of ImageMatch." \
+      "  Please update your config file.")
+      return None
+
+

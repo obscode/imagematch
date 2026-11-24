@@ -565,7 +565,7 @@ class Observation:
          if self.wcs is None:
             raise AttributeError("To use magcat, you need a WCS in the image")
          magtab = ascii.read(magcat, fill_values=[('...',0)])
-         ii,jj = self.wcs.wcs_world2pix(magtab[racol], magtab[deccol], 0)
+         ii,jj = self.wcs.all_world2pix(magtab[racol], magtab[deccol], 0)
          self.segmags = np.zeros((self.seg.max()+1,))-999
          for i in range(len(ii)):
             if not 0 < jj[i] < self.data.shape[0] or \
@@ -593,6 +593,16 @@ class Observation:
       q = self.sexdata["FLAGS"]
       q = np.array([int(qq) for qq in q])
 
+      # If specified, remove distant points from SN location
+      if self.maxdist > 0 and self.snpos is not None:
+         print("Here!")
+         # throw out distant points for coordinate transformation
+         sni,snj = self.snpos.topixel()
+         dists = np.sqrt((x-sni)**2 + (y - snj)**2)
+         close = np.less(dists, self.maxdist)
+         x,y,m = np.compress(close, [x,y,m], 1)
+         q = q[close]
+
       # Should make this an option...
       cids = np.less_equal(q,4)
       if not self.crowd:
@@ -614,6 +624,7 @@ class Observation:
          num_nn = np.sum(np.less(ds, self.min_sep/self.scale), axis=1) - 1
          ids = np.nonzero(np.equal(num_nn, 0))
          x,y,m,q = np.take([x,y,m,q], ids, 1)
+
 
       a = self.pa*np.pi/180
       o = np.argsort(m)[:self.nmax]     # the tne nmax brightest objects
@@ -652,7 +663,7 @@ class Observation:
       return objects
 
    def objmatch(self,nord=0,perr=2,aerr=1.0, angles=[0.0],interactive=0,
-         use_db=0, iter=3):
+         use_db=0, iter=3, usewcs=True):
       '''Figure out which objects match up with which other objects in the
       image and template (master) frames.'''
       self.log("Matching "+self.master.image+" to "+self.image)
@@ -694,8 +705,8 @@ class Observation:
                                "fit_psf module.")
          x0,x1,y0,y1 = [],[],[],[]
          for xi,yi in self.starlist:
-            [[i0,j0]] = self.wcs.wcs_world2pix([[xi,yi]],1)
-            [[i1,j1]] = self.master.wcs.wcs_world2pix([[xi,yi]],1)
+            [[i0,j0]] = self.wcs.all_world2pix([[xi,yi]],1)
+            [[i1,j1]] = self.master.wcs.all_world2pix([[xi,yi]],1)
             if not (10 < i0 < self.data.shape[1]-10 and \
                     10 < j0 < self.data.shape[0]-10 and \
                     10 < i1 < self.master.data.shape[1]-10 and \
@@ -712,11 +723,11 @@ class Observation:
       else:
          # No guidance, just go with the stars we can find.
 
-         if self.wcs is not None and self.master.wcs is not None:
+         if self.wcs is not None and self.master.wcs is not None and usewcs:
             # Woo-hoo!  We've got a WCS.  This will make matching much
             #  easier.
-            uv0 = self.wcs.wcs_pix2world(np.transpose([self.x,self.y]),1)
-            uv1 = self.master.wcs.wcs_pix2world(
+            uv0 = self.wcs.all_pix2world(np.transpose([self.x,self.y]),1)
+            uv1 = self.master.wcs.all_pix2world(
                   np.transpose([self.master.x,self.master.y]),1)
             if self.verb > 1:  np.savetxt('uv0', uv0)
             if self.verb > 1:  np.savetxt('uv1', uv1)
@@ -731,6 +742,7 @@ class Observation:
                return -1
             x0 = self.x[gids];  y0 = self.y[gids]
             x1 = self.master.x[idx][gids];  y1 = self.master.y[idx][gids]
+            np.savetxt('first_pass_matches.txt', np.transpose([x0,y0,x1,y1]))
          else:
             # Do it the hard way...  Look for pairs of ojbects that have
             # the same distances and vector directions. There's probably a
@@ -788,12 +800,12 @@ class Observation:
          Niter = iter
 
       # If specified, remove distant points
-      if self.maxdist > 0 and self.snpos is not None:
-         # throw out distant points for coordinate transformation
-         sni,snj = self.snpos.topixel()
-         dists = np.sqrt((x0-sni)**2 + (y0 - snj)**2)
-         close = np.less(dists, self.maxdist)
-         x0,y0,x1,y1 = np.compress(close, [x0,y0,x1,y1], 1)
+      #if self.maxdist > 0 and self.snpos is not None:
+      #   # throw out distant points for coordinate transformation
+      #   sni,snj = self.snpos.topixel()
+      #   dists = np.sqrt((x0-sni)**2 + (y0 - snj)**2)
+      #   close = np.less(dists, self.maxdist)
+      #   x0,y0,x1,y1 = np.compress(close, [x0,y0,x1,y1], 1)
 
       # At this point, we should have a set of matching x,y pairs in the
       # image and template frames
@@ -841,13 +853,13 @@ class Observation:
          allm1 = np.array(self.master.sexdata["MAG_AUTO"])
       allq1 = np.array(self.master.sexdata["FLAGS"])
 
-      if self.maxdist > 0 and self.snpos is not None:
-         # throw out distant points for coordinate transformation
-         sni,snj = self.snpos.topixel()
-         dists = np.sqrt((allx0-sni)**2 + (ally0-snj)**2)
-         close = np.less(dists, self.maxdist)
-         allx0,ally0,star0,allm0,allq0 = np.compress(close,
-               [allx0,ally0,star0,allm0,allq0], 1)
+      #if self.maxdist > 0 and self.snpos is not None:
+      #   # throw out distant points for coordinate transformation
+      #   sni,snj = self.snpos.topixel()
+      #   dists = np.sqrt((allx0-sni)**2 + (ally0-snj)**2)
+      #   close = np.less(dists, self.maxdist)
+      #   allx0,ally0,star0,allm0,allq0 = np.compress(close,
+      #         [allx0,ally0,star0,allm0,allq0], 1)
 
       #np.savetxt('pass0_matches.np',[x0,y0,x1,y1])
       #np.savetxt('allx0s.np', [allx0,ally0])
@@ -895,10 +907,10 @@ class Observation:
             f1 = np.power(10,-0.4*(m1-min(m1)))
             # not sure about the point here...
             wt = np.sqrt(f0+f1)# * 0.0 + 1
-            if self.maxdist is not None and self.snpos is not None:
-               sni,snj = self.snpos.topixel()
-               dists = np.sqrt((x0 - sni)**2 + (y0 - snj)**2)
-               wt = wt*np.less(dists, self.maxdist)
+            #if self.maxdist is not None and self.snpos is not None:
+            #   sni,snj = self.snpos.topixel()
+            #   dists = np.sqrt((x0 - sni)**2 + (y0 - snj)**2)
+            #   wt = wt*np.less(dists, self.maxdist)
 
             Nmatches = len(x0)
             if nord < nord0:
@@ -1127,8 +1139,8 @@ class Observation:
             # Here we don't bother with our own coordinate solution,
             #  we use the WCS in each image to do the coordinate
             #  transformation
-            ux,uy = self.wcs.wcs_pix2world(self.ox,self.oy,0)
-            ix,iy = self.master.wcs.wcs_world2pix(ux,uy, 1)
+            ux,uy = self.wcs.all_pix2world(self.ox,self.oy,0)
+            ix,iy = self.master.wcs.all_world2pix(ux,uy, 0)
             self.tx = ix - self.ox
             self.ty = iy - self.oy
          else:
@@ -1183,15 +1195,21 @@ class Observation:
       if getattr(self, '_bg', None) is not None:
          self.log("Using stored: BG=%.3f with sigma=%.3f" % (self._bg,self._r))
          return self._bg,self._r
+      mask = self.mask.get_mask() if self.mask else None
+      if mask is not None:
+         gids = (mask == 1).astype(np.float32)
+      else:
+         gids = np.ones(self.data.shape,np.float32)
+
       for uk in range(Niter):
          if uk:
-            ukeep = 1.0*between(self.data, bg-4*r, bg+2*r)
+            ukeep = 1.0*between(self.data, bg-4*r, bg+2*r)*gids
             ukeep = 1.0*np.equal(VTKConvolve(ukeep, k=5, numret=1),1.0)
             udata = np.compress(ukeep.ravel(), self.data.ravel())
          else:
-            udata = self.data.ravel()
+            udata = self.data.ravel()[gids.ravel() > 0]
          
-         bg = GaussianBG(udata,99)
+         bg = GaussianBG(udata,99, check=1)
          #d = VTKSubtract(udata, bg)
          d = udata - bg
          r = 1.49*np.median(abs(d))
@@ -1672,12 +1690,13 @@ class Observation:
 
 
    def GoCatGo(self,master,verb=0,rev=0,xwin=None,ywin=None, 
+               mxwin=None, mywin=None,
                skyoff=0,pwid=0, perr=5.0,nmax=40,nord=0,spatial=0,mcut=0,
                vcut=1e8,match=1, subt=0, registered=0,preserve=0, 
                min_sep=None, quick_convolve=0, do_sex=0, thresh=3., 
                sexdir="./sex", sexcmd='sex', starmin=0, maxdist=-1,
                angles=[0.0], use_db=0, interactive=0, starlist=None, 
-               diff_size=None, bs=False, crowd=False, usewcs=False,
+               diff_size=None, bs=False, crowd=False, usewcs=False, usewcs_r=False,
                magcat=None, racol='RA', deccol='DEC', magcol='mag',
                Niter=3, blur=None):
       self.master = master
@@ -1691,6 +1710,13 @@ class Observation:
          self.mask.add_mask(xwin[0], None, xwin[1], None, sense='outside')
       elif ywin:
          self.mask.add_mask(None, ywin[0], None, ywin[1], sense='outside')
+      if mxwin and mywin:
+         self.master.mask.add_mask(mxwin[0], mywin[0], mxwin[1], mywin[1], 
+               sense='outside')
+      elif mxwin:
+         self.master.mask.add_mask(mxwin[0], None, mxwin[1], None, sense='outside')
+      elif mywin:
+         self.master.mask.add_mask(None, mywin[0], None, mywin[1], sense='outside')
       self.spatial=spatial
       self.rev=rev
       self.vcut=vcut
@@ -1702,6 +1728,8 @@ class Observation:
       self.sexcmd = sexcmd
       self.starmin = starmin
       self.maxdist = maxdist
+      self.master.maxdist = maxdist
+      #self.master.snpos = self.snpos
       self.thresh = thresh
       self.master.do_sex=do_sex
       self.master.sexdir = sexdir
@@ -1727,7 +1755,8 @@ class Observation:
          self.compute(nmax=nmax, min_sep=min_sep)
          self.master.compute(nmax=nmax, min_sep=min_sep)
          res = self.objmatch(nord=nord,perr=perr,angles=angles,
-               interactive=interactive, use_db=use_db, iter=Niter)
+               interactive=interactive, use_db=use_db, iter=Niter,
+               usewcs=usewcs_r)
          if res < 0:
             self.log('Failed object match... giving up.')
             return -1
@@ -1760,6 +1789,7 @@ class Observation:
 
             # Condistion we're testing:  rdvs are larger for deconvolve
             idx = len(rdv1)//2
+
             self.log("AUTO: {} {}".format(np.sum(rdv1[:idx]<rdv2[:idx]), 
                           np.sum(rdv1[:idx]<rdv2[idx])/idx))
             if np.sum(rdv1[:idx] < rdv2[:idx])/len(rdv1[:idx]) > 0.5:

@@ -66,10 +66,17 @@ def getgausky(D,dn,verb=0):
    #    drawln([gsol[0]-gsol[1],gsol[0]-gsol[1]],[-max(dS),10*max(dS)],ls=4,ci=7)
    return gsol[0]
 
-def GaussianBG(data,dn,verb=0,check=1):
+def GaussianBG(data,dn,verb=0,check=1, badvalue=None):
+   print("GaussianBG: data size %d" % len(data))
    if check: 
-      data = compress(greater(abs(data.ravel()),abs(getpct(data.ravel(),66))/1e12),
-                      data.ravel())
+      thresh = abs(getpct(data.ravel(),66))/1e12
+      print(f"GaussianBG: removing extreme values, data > {thresh}")
+      data = compress(greater(abs(data.ravel()),thresh), data.ravel())
+      print("GaussianBG: data size reduced to %d" % len(data))
+   if badvalue is not None:
+      data = compress(not_equal(data.ravel(), badvalue), data.ravel())
+      print("GaussianBG: data size further reduced to %d" % len(data))
    data = sort(data)
+   savetxt("gausky_data.txt", data)
    bg = getgausky(data.ravel(),dn,verb=verb)
    return bg

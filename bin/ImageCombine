@@ -262,9 +262,9 @@ for o in Observations:
    if ref.tsigma is not None:
       sig_stack.append(ref.tsigma)
       print("NaN in %s?:" % \
-            (ref.master.image), sometrue(isnan(ref.master.sigma)))
+            (ref.master.image), any(isnan(ref.master.sigma)))
       print("NaN in trans. %s?:" % \
-            (ref.master.image), sometrue(isnan(ref.tsigma)))
+            (ref.master.image), any(isnan(ref.tsigma)))
    else:
       sig_stack.append(make_noise(ref.timage, bgs[-1], gain, rdnoise))
 
